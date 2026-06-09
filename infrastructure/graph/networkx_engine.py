@@ -18,7 +18,6 @@ class NetworkXRoadEngine:
 
     def save_to_json(self, filepath: str):
         """Exports the network using NetworkX's native node-link format."""
-        # Extracts everything (including graph-level metadata like map_dim)
         data = nx.node_link_data(self.graph)
 
         with open(filepath, 'w') as f:
@@ -34,18 +33,18 @@ class NetworkXRoadEngine:
     def get_neighbors(self, vertex_id: int) -> List[int]:
         return list(self.graph.neighbors(vertex_id))
 
-    def get_edge_coordinates(self, u: int, v: int, traveled: float) -> Tuple[float, float]:
+    def get_edge_coordinates(self, start_vertex: int, end_vertex: int, traveled: float) -> Tuple[float, float]:
         """Calculates physical (x,y) world coordinates based on edge progress."""
         if not (0.0 <= traveled <= 1.0):
             raise ValueError('"traveled" parameter must be between 0.0 and 1.0')
 
-        edge_data = self.graph.edges[u, v]
-        start_node = self.graph.nodes[u]
-        end_node = self.graph.nodes[v]
+        edge_data = self.graph.edges[start_vertex, end_vertex]
+        start_node = self.graph.nodes[start_vertex]
+        end_node = self.graph.nodes[end_vertex]
 
         if edge_data["type"] == "line":
             x = start_node['x'] + traveled * (end_node['x'] - start_node['x'])
             y = start_node['y'] + traveled * (end_node['y'] - start_node['y'])
-            return (x, y)
+            return x, y
         else:
             raise NotImplementedError(f"Edge type {edge_data['type']} not implemented")
