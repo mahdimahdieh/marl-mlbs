@@ -1,7 +1,6 @@
 import json
-import math
+from typing import Tuple, Hashable
 import networkx as nx
-from typing import Tuple, List
 
 
 class NetworkXRoadEngine:
@@ -30,7 +29,7 @@ class NetworkXRoadEngine:
     def get_map_dimension(self):
         return self.graph.graph.get("map_dim")
 
-    def get_neighbors(self, vertex_id: int) -> List[int]:
+    def get_neighbors(self, vertex_id: int) -> list[Hashable]:
         return list(self.graph.neighbors(vertex_id))
 
     def get_edge_coordinates(self, start_vertex: int, end_vertex: int, traveled: float) -> Tuple[float, float]:
