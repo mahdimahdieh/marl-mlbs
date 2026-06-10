@@ -9,7 +9,7 @@ class BaseStation:
     """Parent container for base stations."""
     id: int
     capacity: int
-    maximum_coverage_radius: float
+    coverage_radius: float
 
     # Track coverage as an integer count
     current_coverage_count: int = 0

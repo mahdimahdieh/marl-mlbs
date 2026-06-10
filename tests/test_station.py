@@ -15,9 +15,9 @@ def empty_registry():
 @pytest.fixture
 def populated_registry():
     registry = AgentManager()
-    vbs = VehicleBaseStation(id=0, capacity=10, maximum_coverage_radius=50.0)
+    vbs = VehicleBaseStation(id=0, capacity=10, coverage_radius=50.0)
     # FBS tethered to VBS 0
-    fbs = FlyingBaseStation(id=1, capacity=5, maximum_coverage_radius=20.0, host_vbs_id=0)
+    fbs = FlyingBaseStation(id=1, capacity=5, coverage_radius=20.0, host_vbs_id=0)
 
     registry.register_vbs(vbs)
     registry.register_fbs(fbs)
@@ -28,7 +28,7 @@ def populated_registry():
 
 def test_vbs_initialization():
     """Verifies that the VehicleBaseStation initializes as a pure state tracker."""
-    vbs = VehicleBaseStation(id=0, capacity=10, maximum_coverage_radius=50.0)
+    vbs = VehicleBaseStation(id=0, capacity=10, coverage_radius=50.0)
     assert vbs.current_branch_id == 0
     assert vbs.current_slot_index == 0
     assert vbs.current_coverage_count == 0
@@ -37,8 +37,8 @@ def test_vbs_initialization():
 
 def test_fbs_tethering_logic(empty_registry):
     """Verifies that registering an FBS automatically tethers it to its host VBS."""
-    vbs = VehicleBaseStation(id=0, capacity=10, maximum_coverage_radius=50.0)
-    fbs = FlyingBaseStation(id=1, capacity=5, maximum_coverage_radius=20.0, host_vbs_id=0)
+    vbs = VehicleBaseStation(id=0, capacity=10, coverage_radius=50.0)
+    fbs = FlyingBaseStation(id=1, capacity=5, coverage_radius=20.0, host_vbs_id=0)
 
     empty_registry.register_vbs(vbs)
     empty_registry.register_fbs(fbs)
@@ -49,7 +49,7 @@ def test_fbs_tethering_logic(empty_registry):
 
 def test_coverage_efficiency_math():
     """Verifies the individual coverage efficiency calculations."""
-    vbs = VehicleBaseStation(id=0, capacity=10, maximum_coverage_radius=50.0)
+    vbs = VehicleBaseStation(id=0, capacity=10, coverage_radius=50.0)
 
     # 0 coverage
     assert vbs.get_coverage_efficiency() == 0.0
