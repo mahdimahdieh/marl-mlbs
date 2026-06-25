@@ -4,11 +4,12 @@ marl_network_sim/
 │   │   ├── graph_engine_abc.py
 │   │   ├── network_sim_abc.py
 │   │   └── tracking_abc.py
-│   └── entities/                   # Dataclasses (Node, Edge, AgentState)
+│   └── entities/                   # Dataclasses (VBS, FBS, etc)
 ├── infrastructure/                 # Concrete implementations of your ABCs (The Adapters)
 │   ├── graph/
 │   │   └── networkx_engine.py      # NetworkX implementation of graph_engine_abc
 │   ├── simulation/
+│   │   ├── pywisim                 # PyWiSim submodule cloned from gitlab
 │   │   └── pywisim_adapter.py      # PyWiSim implementation of network_sim_abc
 │   └── tracking/
 │       └── wandb_tracker.py        # Metrics and diagramming via Weights & Biases / Matplotlib
@@ -19,5 +20,8 @@ marl_network_sim/
 │       └── ppo_module.py           # RL algorithm slot (e.g., using Ray RLlib or CleanRL)
 ├── visualization/                  # Optional 2D rendering and video export
 │   └── pygame_renderer.py
+├── tests/                          # Unit tests
+│   ├── graph/
+
 ├── config/                         # YAML/JSON configs for environment and hyperparameters
 └── main.py                         # The entry point that wires the dependencies together
