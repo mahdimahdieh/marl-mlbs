@@ -52,7 +52,12 @@ def bootstrap_environment(config_path: str, graph_path: str):
         "agent_manager": manager,
         "graph_engine": graph_engine,
         "sim_adapter": sim_adapter,
-        "max_cycles": config["env_settings"]["max_cycles"]
+        "max_cycles": config["env_settings"]["max_cycles"],
+        # FIXED: Forward graph topology settings from config to the env.
+        # Without this, CoverageParallelEnv ignores simulation_config.json entirely
+        # for these parameters and falls back to hardcoded defaults on every run.
+        "center_node_id": config.get("graph_settings", {}).get("center_node_id", 0),
+        "max_slots_per_branch": config.get("graph_settings", {}).get("max_slots_per_branch", 10),
     }
 
     return env_config, config["hyperparameters"], config
@@ -82,18 +87,44 @@ def main():
     parser.add_argument("--episodes", type=int, default=5000)
     args = parser.parse_args()
 
-    # 1. Initialize System Architecture
     env_config, hp, raw_config = bootstrap_environment(args.config, args.graph)
     env = CoverageParallelEnv(env_config)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Booting Training Loop on: {device.upper()}")
 
-    # Observation space is 3 [norm_x, norm_y, cap_ratio] for both.
-    ppo = HeterogeneousPPOManager(vbs_obs_dim=3, fbs_obs_dim=3, lr=hp["learning_rate"], device=device)
+    # FIXED: Derive ALL network I/O dimensions from the live env at startup.
+    # This makes main.py a passive consumer of env's ground truth — if any config
+    # change cascades through to CoverageParallelEnv (e.g., new branch makes VBS Discrete(4)),
+    # PPO receives the corrected dims automatically on the next run.
+    vbs_agent_id = next(a for a in env.possible_agents if "vbs" in a)
+    fbs_agent_id = next(a for a in env.possible_agents if "fbs" in a)
 
-    tracker = WandbTracker(project_name="MARL-Network-Sim", config=raw_config, run_name="PPO-Y-Graph-MVP")
+    vbs_obs_dim    = env.observation_space(vbs_agent_id).shape[0]   # [norm_x, norm_y, cap_ratio]
+    fbs_obs_dim    = env.observation_space(fbs_agent_id).shape[0]   # same format
+    vbs_action_dim = env.action_space(vbs_agent_id).n               # dynamic: len(_branch_node_ids)
+    fbs_action_dim = env.action_space(fbs_agent_id).n               # dynamic: 1 + 8*2 = 17
 
+    print(
+        f"Network I/O | VBS: obs={vbs_obs_dim} act={vbs_action_dim}"
+        f" | FBS: obs={fbs_obs_dim} act={fbs_action_dim}"
+    )
+
+    ppo = HeterogeneousPPOManager(
+        vbs_obs_dim=vbs_obs_dim,
+        fbs_obs_dim=fbs_obs_dim,
+        vbs_action_dim=vbs_action_dim,   # NEW: required after Fix 2
+        fbs_action_dim=fbs_action_dim,   # NEW: required after Fix 2
+        lr=hp["learning_rate"],
+        device=device
+    )
+
+    tracker = WandbTracker(
+        project_name="MARL-Network-Sim",
+        config=raw_config,
+        run_name="PPO-Y-Graph-MVP"
+    )
+    
     # 2. Training Loop
     for episode in range(1, args.episodes + 1):
         obs_dict, infos_dict = env.reset(seed=episode)
