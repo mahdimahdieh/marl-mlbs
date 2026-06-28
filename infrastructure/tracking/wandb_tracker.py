@@ -11,12 +11,16 @@ import os
 
 # Force offline mode so the environment never attempts to hit the W&B servers
 os.environ["WANDB_MODE"] = "offline"
+os.environ['WANDB_API_KEY'] = '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'
 
 class WandbTracker:
     def __init__(self, project_name: str, config: Dict[str, Any], run_name: str = None):
         # We explicitly set the mode here to ensure it overrides any environment settings
         self.run = wandb.init(
-            project=project_name,
+            entity="mmm4561232229",  # username
+            project="marl-mlbs",
+            mode='offline',
+            sync_tensorboard=True,
             name=run_name,
             config=config,
             settings=wandb.Settings(
