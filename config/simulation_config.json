@@ -1,0 +1,52 @@
+{
+    "env_settings": {
+        "max_cycles": 100,
+        "num_users": 200
+    },
+    "vbs_agents": [
+        {
+            "id": 0,
+            "capacity": 50,
+            "coverage_radius": 25.0
+        },
+        {
+            "id": 1,
+            "capacity": 50,
+            "coverage_radius": 25.0
+        }
+    ],
+    "fbs_agents": [
+        {
+            "id": 2,
+            "host_vbs_id": 0,
+            "capacity": 20,
+            "coverage_radius": 12.0
+        },
+        {
+            "id": 3,
+            "host_vbs_id": 0,
+            "capacity": 20,
+            "coverage_radius": 12.0
+        },
+        {
+            "id": 4,
+            "host_vbs_id": 1,
+            "capacity": 20,
+            "coverage_radius": 12.0
+        },
+        {
+            "id": 5,
+            "host_vbs_id": 1,
+            "capacity": 20,
+            "coverage_radius": 12.0
+        }
+    ],
+    "hyperparameters": {
+        "learning_rate": 3e-4,
+        "ppo_epochs": 4,
+        "batch_size": 64,
+        "clip_coef": 0.2,
+        "ent_coef": 0.01,
+        "vf_coef": 0.5
+    }
+}
