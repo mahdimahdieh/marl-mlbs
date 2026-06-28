@@ -1,8 +1,9 @@
 import torch
 import time
+import pygame
 from rl.envs.pettingzoo_env import CoverageParallelEnv
 from rl.agents.ppo_module import HeterogeneousPPOManager
-from infrastructure.tracking.pygame_renderer import PygameRenderer
+from visualization.pygame_renderer import PygameRenderer
 from main import bootstrap_environment
 
 
@@ -36,9 +37,9 @@ def run_inference(config_path: str, graph_path: str, model_weights_path: str = N
     print("Starting Inference Loop. Close the Pygame window to stop.")
 
     while env.agents and not done:
-        # Handle GUI events
-        for event in renderer.pygame.event.get():
-            if event.type == renderer.pygame.QUIT:
+        # FIX 2: Call direct pygame events instead of via the renderer wrapper
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
                 done = True
 
         actions = {}
@@ -48,11 +49,10 @@ def run_inference(config_path: str, graph_path: str, model_weights_path: str = N
             t_obs = torch.tensor(obs_dict[agent_id], dtype=torch.float32).to(device)
             t_mask = torch.tensor(infos_dict[agent_id]["action_mask"], dtype=torch.float32).to(device)
 
-            # For inference, you typically want the argmax of the logits,
-            # but using our existing getter works for deterministic/greedy evaluation
-            # if we pass a modified temperature, or just rely on the trained distribution.
             action, _, _ = ppo.get_action(t_obs, agent_type, action_mask=t_mask)
-            actions[agent_id] = action
+
+            # FIX 3: Strip the tensor back to a native Python int so PettingZoo can process it
+            actions[agent_id] = action.cpu().item() if hasattr(action, "item") else action
 
         # Step Environment (Now using real PyWiSim 5G SINR math)
         obs_dict, rewards_dict, terminations, truncations, infos_dict = env.step(actions)
@@ -61,7 +61,7 @@ def run_inference(config_path: str, graph_path: str, model_weights_path: str = N
         # Render the frame
         renderer.render(env, step)
 
-        # Control playback speed (e.g., 2 frames per second for easy viewing)
+        # Control playback speed (2 frames per second)
         time.sleep(0.5)
 
         if all(terminations.values()) or all(truncations.values()):
@@ -69,7 +69,8 @@ def run_inference(config_path: str, graph_path: str, model_weights_path: str = N
             obs_dict, infos_dict = env.reset()
             step = 0
 
-    renderer.pygame.quit()
+    # FIX 4: Call native pygame shutdown
+    pygame.quit()
 
 
 if __name__ == "__main__":
