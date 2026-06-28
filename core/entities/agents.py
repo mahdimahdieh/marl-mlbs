@@ -31,7 +31,7 @@ class BaseStation:
 @dataclass
 class FlyingBaseStation(BaseStation):
     host_vbs_id: int = None
-    maximum_distance: int = None
+    maximum_distance: float = None
     # Action Space: 0 to 16
     # 0: Hover
     # 1-8: N, NE, E, SE, S, SW, W, NW (Half Distance)
