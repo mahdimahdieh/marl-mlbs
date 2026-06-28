@@ -87,7 +87,6 @@ class CoverageParallelEnv(ParallelEnv):
         np_radii = np.array(coverage_radii, dtype=np.float32)  # (N,)
 
         # Request the full (N_agents, N_users) boolean matrix.
-        # DO NOT collapse to counts here — Phase 3 needs user-level resolution.
         coverage_matrix = self.sim_adapter.compute_coverage_matrix(
             np_coords, np_radii
         )  # shape: (N, M) bool
@@ -98,48 +97,46 @@ class CoverageParallelEnv(ParallelEnv):
             obj.current_coverage_count = int(count)
 
         # ------------------------------------------------------------------ #
-        # PHASE 3: DIFFERENTIAL REWARD ENGINEERING                            #
-        #                                                                      #
-        # True marginal contribution:                                          #
-        #   reward_i = P(user covered | ALL agents)                           #
-        #            - P(user covered | all agents EXCEPT i)                  #
-        #                                                                      #
-        # This requires the (N, M) matrix — aggregate counts are insufficient. #
+        # PHASE 3: REVISED TEAM-ALIGNED REWARD ENGINEERING                  #
         # ------------------------------------------------------------------ #
         total_users = self.sim_adapter.num_users
         n_agents = len(self.agents)
 
-        # Union of all agent coverages — which users are covered at all?
-        # any_covered shape: (M,) bool
+        # Union of all agent coverages
         any_covered = np.any(coverage_matrix, axis=0)
         total_covered = int(any_covered.sum())
+
+        # Pull global efficiency directly into the step reward calculation
+        global_efficiency = float(self.agent_manager.get_total_efficiency())
 
         rewards = {}
         for i, agent_id in enumerate(self.agents):
             if n_agents > 1:
-                # Counterfactual: boolean mask excluding agent i
+                # Counterfactual: mask excluding agent i
                 others_mask = np.ones(n_agents, dtype=bool)
                 others_mask[i] = False
-                # Which users would still be covered without agent i?
                 covered_without_i = int(
                     np.any(coverage_matrix[others_mask], axis=0).sum()
                 )
             else:
-                # Solo agent: full credit for all coverage it provides
                 covered_without_i = 0
 
-            # Marginal contribution ∈ [0.0, 1.0]
-            # Numerically stable: no NaN risk since total_users > 0 is enforced
-            rewards[agent_id] = float(
+            # Marginal contribution component ∈ [0.0, 1.0]
+            marginal_contribution = float(
                 (total_covered - covered_without_i) / max(total_users, 1)
             )
+
+            # --- COOPERATIVE BLEND REWARD ---
+            # 40% Marginal Credit Assignment + 60% Global Objective Alignment
+            # This eliminates reward hacking by heavily penalizing low global efficiency.
+            rewards[agent_id] = (0.4 * marginal_contribution) + (0.6 * global_efficiency)
 
         # ------------------------------------------------------------------ #
         # PHASE 4: HORIZON & TERMINATION                                       #
         # ------------------------------------------------------------------ #
         self.step_count += 1
         env_truncation = self.step_count >= self.max_cycles
-        env_termination = self.agent_manager.get_total_efficiency() >= 0.95
+        env_termination = global_efficiency >= 0.95
 
         terminations = {agent: env_termination for agent in self.agents}
         truncations = {agent: env_truncation for agent in self.agents}
