@@ -1,34 +1,47 @@
 import wandb
 from typing import Dict, Any
 import numpy as np
+import os
 
 try:
     import torch
 except ImportError:
     torch = None
 
-import os
+# SECURITY FIX: Remove hardcoded API key from source code.
+# Set it in your shell or CI environment instead:
+#   export WANDB_API_KEY="your_key_here"
+# The os.environ['WANDB_API_KEY'] = '...' line has been intentionally removed.
+os.environ["WANDB_MODE"] = "offline"   # Safe to keep at module level
 
-# Force offline mode so the environment never attempts to hit the W&B servers
-os.environ["WANDB_MODE"] = "offline"
-os.environ['WANDB_API_KEY'] = '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'
 
 class WandbTracker:
-    def __init__(self, project_name: str, config: Dict[str, Any], run_name: str = None):
-        # We explicitly set the mode here to ensure it overrides any environment settings
+    def __init__(
+        self,
+        project_name: str,          # FIXED: now actually used (was silently ignored)
+        config: Dict[str, Any],
+        run_name: str = None,
+        wandb_entity: str = None    # FIXED: was hardcoded username; now an optional parameter
+    ):
+        # FIXED: project=project_name  (was hardcoded "marl-mlbs", ignoring the argument)
+        # FIXED: entity=wandb_entity   (was hardcoded "mmm4561232229")
+        # wandb_entity=None is valid for offline mode; W&B resolves entity on sync.
         self.run = wandb.init(
-            entity="mmm4561232229",  # username
-            project="marl-mlbs",
+            entity=wandb_entity,
+            project=project_name,   # FIXED: now correctly consumes the injected parameter
             mode='offline',
             sync_tensorboard=True,
             name=run_name,
             config=config,
             settings=wandb.Settings(
                 start_method="thread",
-                mode="offline"  # Ensures the client never tries to reach the server
+                mode="offline"
             )
         )
-        print("W&B Initialized in OFFLINE mode. Data will be saved locally in the 'wandb' folder.")
+        print(
+            f"W&B Initialized in OFFLINE mode. "
+            f"Project: '{project_name}' | Run: '{run_name}'"
+        )
 
     def _sanitize_metrics(self, metrics: Dict[str, Any]) -> Dict[str, float]:
         """
