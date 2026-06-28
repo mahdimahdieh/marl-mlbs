@@ -8,17 +8,31 @@ from main import bootstrap_environment
 
 
 def run_inference(config_path: str, graph_path: str, model_weights_path: str = None):
-    # 1. Initialize Environment
     env_config, hp, _ = bootstrap_environment(config_path, graph_path)
     env = CoverageParallelEnv(env_config)
-
-    # STRICT 5G REQUIREMENT: Turn on the PyWiSim high-fidelity channel modeling
     env.sim_adapter.set_evaluation_mode(True)
 
-    # 2. Load the trained network
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    ppo = HeterogeneousPPOManager(vbs_obs_dim=3, fbs_obs_dim=3, lr=0.0, device=device)
 
+    # FIXED: Derive dims from env, matching main.py exactly (single source of truth).
+    # Old: HeterogeneousPPOManager(vbs_obs_dim=3, fbs_obs_dim=3, lr=0.0, ...)
+    #   → missing required action_dim params after Fix 2; raises TypeError on launch.
+    vbs_agent_id = next(a for a in env.possible_agents if "vbs" in a)
+    fbs_agent_id = next(a for a in env.possible_agents if "fbs" in a)
+
+    vbs_obs_dim    = env.observation_space(vbs_agent_id).shape[0]
+    fbs_obs_dim    = env.observation_space(fbs_agent_id).shape[0]
+    vbs_action_dim = env.action_space(vbs_agent_id).n
+    fbs_action_dim = env.action_space(fbs_agent_id).n
+
+    ppo = HeterogeneousPPOManager(
+        vbs_obs_dim=vbs_obs_dim,
+        fbs_obs_dim=fbs_obs_dim,
+        vbs_action_dim=vbs_action_dim,
+        fbs_action_dim=fbs_action_dim,
+        lr=0.0,         # Frozen weights for inference; no gradient updates
+        device=device
+    )
     if model_weights_path:
         # Load your saved weights here
         # ppo.vbs_net.load_state_dict(torch.load(f"{model_weights_path}_vbs.pt"))
