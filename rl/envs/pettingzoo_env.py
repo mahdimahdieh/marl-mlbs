@@ -17,7 +17,7 @@ class CoverageParallelEnv(ParallelEnv):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
-        # 1. Dependency Injection of our High-Performance Adapters
+        # 1. Dependency Injection of High-Performance Adapters
         self.agent_manager: AgentManager = config["agent_manager"]
         self.graph_engine: NetworkXRoadEngine = config["graph_engine"]
         self.sim_adapter: PyWiSimAdapter = config["sim_adapter"]
@@ -25,27 +25,42 @@ class CoverageParallelEnv(ParallelEnv):
         self.max_cycles = config.get("max_cycles", 100)
         self.map_dim = self.graph_engine.get_map_dimension()
 
-        # 2. Strict PettingZoo Agent Tracking
-        self.possible_agents = [f"vbs_{v.id}" for v in self.agent_manager.vbs_registry.values()] + \
-                               [f"fbs_{f.id}" for f in self.agent_manager.fbs_registry.values()]
-        self.agents = self.possible_agents[:]
+        # FIXED: Read graph topology parameters from injected config dict instead of
+        # hardcoding them as literals scattered across 3+ methods.
+        self.center_node_id: int = config.get("center_node_id", 0)
+        self.max_slots_per_branch: int = config.get("max_slots_per_branch", 10)
 
+        # Pre-compute the canonical branch node ID list ONCE at init.
+        # sorted() guarantees a deterministic, stable action→node mapping across runs:
+        #   action index 0 → _branch_node_ids[0]
+        #   action index 1 → _branch_node_ids[1]  ... etc.
+        # This is the single source of truth consumed by action_space, _apply_actions,
+        # _calculate_world_coords, and _compute_observations_and_masks.
+        self._branch_node_ids: list = sorted(
+            self.graph_engine.get_neighbors(self.center_node_id)
+        )
+
+        # 2. Strict PettingZoo Agent Tracking
+        self.possible_agents = (
+            [f"vbs_{v.id}" for v in self.agent_manager.vbs_registry.values()] +
+            [f"fbs_{f.id}" for f in self.agent_manager.fbs_registry.values()]
+        )
+        self.agents = self.possible_agents[:]
         self.step_count = 0
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
-        # STRICT RL REQUIREMENT: Bound observations to [0.0, 1.0] to prevent gradient explosion.
-        # Format: [norm_x, norm_y, norm_capacity_ratio]
         return spaces.Box(low=0.0, high=1.0, shape=(3,), dtype=np.float32)
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Discrete:
         if "vbs" in agent:
-            # 0: Branch 0, 1: Branch 1, 2: Branch 2 (or move towards center)
-            return spaces.Discrete(3)
+            # FIXED: Derive action count from live graph topology, not a literal.
+            # Automatically updates when graph_map.json gains or loses branches.
+            return spaces.Discrete(len(self._branch_node_ids))
         else:
-            # 0: Hover, 1-8: Half-Distance (Polar), 9-16: Full-Distance (Polar)
-            return spaces.Discrete(17)
+            # FBS: 0=Hover + 8 half-dist + 8 full-dist = 17 total
+            return spaces.Discrete(1 + 8 * 2)
 
     def reset(self, seed: int = None, options: Dict = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         self.agents = self.possible_agents[:]
@@ -158,40 +173,59 @@ class CoverageParallelEnv(ParallelEnv):
         for agent_id, action in actions.items():
             agent_obj, is_vbs = self._get_agent_obj(agent_id)
             if is_vbs:
-                # Graph navigation logic (Simplified for MVP bounds)
-                if agent_obj.current_slot_index == 0:  # At center node 0
-                    agent_obj.current_branch_id = action + 1  # Branches 1, 2, 3
+                if agent_obj.current_slot_index == 0:  # At center node
+                    # FIXED: Map action index → actual graph node ID via the canonical list.
+                    # Old: agent_obj.current_branch_id = action + 1
+                    #   → hardcoded offset; crashes with KeyError if branches aren't nodes {1,2,3}.
+                    # New: generalizes to any graph topology (e.g., branches at {2,5,7}).
+                    agent_obj.current_branch_id = self._branch_node_ids[action]
                     agent_obj.current_slot_index += 1
                 else:
-                    if action == agent_obj.current_branch_id - 1:
-                        agent_obj.current_slot_index = min(10, agent_obj.current_slot_index + 1)  # Deeper
+                    # Find which action index means "continue on the current branch"
+                    current_branch_action_idx = self._branch_node_ids.index(
+                        agent_obj.current_branch_id
+                    )
+                    if action == current_branch_action_idx:
+                        # FIXED: cap at max_slots_per_branch from config, not hardcoded 10
+                        agent_obj.current_slot_index = min(
+                            self.max_slots_per_branch,
+                            agent_obj.current_slot_index + 1
+                        )
                     else:
-                        agent_obj.current_slot_index = max(0, agent_obj.current_slot_index - 1)  # Back to center
+                        agent_obj.current_slot_index = max(0, agent_obj.current_slot_index - 1)
             else:
-                # Polar navigation logic
                 agent_obj.current_offset_zone = action
+
 
     def _calculate_world_coords(self, agent_obj, is_vbs) -> Tuple[float, float]:
         """Maps discrete indices into physical (x,y) space for the Simulator."""
         if is_vbs:
             if agent_obj.current_slot_index == 0:
-                return self.graph_engine.get_edge_coordinates(0, 1, 0.0)  # Center
+                # FIXED: Read center node coordinates directly from the graph attribute dict.
+                # Old: get_edge_coordinates(0, 1, 0.0)
+                #   → hardcodes edge (0→1); raises KeyError if that edge was removed in the
+                #   graph update (e.g., branch node IDs changed or center node moved).
+                # New: direct node attribute lookup; immune to any edge-level topology change.
+                node_data = self.graph_engine.graph.nodes[self.center_node_id]
+                return float(node_data['x']), float(node_data['y'])
             else:
-                # Interpolate traveled distance (assuming 10 slots per branch)
-                traveled = agent_obj.current_slot_index / 10.0
-                return self.graph_engine.get_edge_coordinates(0, agent_obj.current_branch_id, traveled)
+                # FIXED: divide by max_slots_per_branch from config, not hardcoded 10.0
+                traveled = agent_obj.current_slot_index / float(self.max_slots_per_branch)
+                return self.graph_engine.get_edge_coordinates(
+                    self.center_node_id,
+                    agent_obj.current_branch_id,
+                    traveled
+                )
         else:
             host_vbs = self.agent_manager.vbs_registry[agent_obj.host_vbs_id]
             hx, hy = self._calculate_world_coords(host_vbs, True)
             if agent_obj.current_offset_zone == 0:
                 return hx, hy
 
-            # Translate action 1-16 into polar offsets
             dist_multiplier = 0.5 if agent_obj.current_offset_zone <= 8 else 1.0
             angle_idx = (agent_obj.current_offset_zone - 1) % 8
-            angle = angle_idx * (np.pi / 4)  # 45 degrees step
-
-            radius = agent_obj.maximum_distance * dist_multiplier  # Max tether distance
+            angle = angle_idx * (np.pi / 4)
+            radius = agent_obj.maximum_distance * dist_multiplier
             return hx + radius * np.cos(angle), hy + radius * np.sin(angle)
 
     def _compute_observations_and_masks(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
@@ -202,20 +236,25 @@ class CoverageParallelEnv(ParallelEnv):
             agent_obj, is_vbs = self._get_agent_obj(agent_id)
             x, y = self._calculate_world_coords(agent_obj, is_vbs)
 
-            # STRICT FIX: Normalize observations to [0, 1] using map dimensions
             norm_x = np.clip(x / self.map_dim[0], 0.0, 1.0)
             norm_y = np.clip(y / self.map_dim[1], 0.0, 1.0)
-            cap_ratio = min(agent_obj.current_coverage_count,
-                            agent_obj.capacity) / agent_obj.capacity if agent_obj.capacity > 0 else 0.0
-
+            cap_ratio = (
+                min(agent_obj.current_coverage_count, agent_obj.capacity) / agent_obj.capacity
+                if agent_obj.capacity > 0 else 0.0
+            )
             obs[agent_id] = np.array([norm_x, norm_y, cap_ratio], dtype=np.float32)
 
-            # Inject structural Action Masking for PPO directly into the `info` dict
             mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
             if is_vbs:
-                # Graph boundary masking: If at slot 10 (edge tip), mask out moving deeper
-                if agent_obj.current_slot_index >= 10:
-                    mask[agent_obj.current_branch_id - 1] = 0
+                # FIXED: use max_slots_per_branch from config, not hardcoded 10.
+                # FIXED: compute action index via list lookup, not arithmetic offset.
+                # Old: mask[agent_obj.current_branch_id - 1] = 0
+                #   → assumes branch IDs are {1,2,3}; silently masks the wrong action
+                #   on any other graph (e.g., branches at {2,5,7} gives mask[-1+2=1] wrong).
+                if (agent_obj.current_slot_index >= self.max_slots_per_branch
+                        and agent_obj.current_branch_id in self._branch_node_ids):
+                    action_idx = self._branch_node_ids.index(agent_obj.current_branch_id)
+                    mask[action_idx] = 0
 
             infos[agent_id] = {"action_mask": mask}
 
