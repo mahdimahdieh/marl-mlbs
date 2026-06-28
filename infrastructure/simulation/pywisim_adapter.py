@@ -48,38 +48,41 @@ class PyWiSimAdapter(NetworkSimABC):
             #     self.pywisim_env.register_ue(ue)
             pass
 
-    def compute_batched_coverage(self, agent_coords: np.ndarray, coverage_radii: np.ndarray) -> np.ndarray:
+    def compute_coverage_matrix(
+            self, agent_coords: np.ndarray, coverage_radii: np.ndarray
+    ) -> np.ndarray:
         """
-        Vectorized Euclidean calculation. Computes exact spatial intersections without loops.
+        Returns the raw (N_agents, N_users) boolean intersection matrix.
+        This is the ONLY correct input for differential reward computation.
+        Collapsing to per-agent counts (via .sum()) loses the per-user association
+        data required to compute counterfactual coverage.
 
-        Inputs:
-            agent_coords:   np.ndarray of shape (N, 2) -> Float x,y positions of all active agents
-            coverage_radii: np.ndarray of shape (N,)    -> Float radii of all active agents
+        Args:
+            agent_coords:   (N, 2) float32 — world coordinates of all active agents
+            coverage_radii: (N,)   float32 — coverage radius per agent
         Returns:
-            counts:         np.ndarray of shape (N,)    -> Integers representing points covered
+            within_radius:  (N, M) bool    — True if user j is within agent i's radius
+        """
+        # (N, 1, 2) - (1, M, 2) = (N, M, 2) delta matrix
+        diff = agent_coords[:, None, :] - self.user_coords[None, :, :]
+        # (N, M) Euclidean distance matrix, no Python loops
+        distances = np.linalg.norm(diff, axis=2)
+        # (N, M) bool — vectorized threshold comparison
+        return distances <= coverage_radii[:, None]
+
+    def compute_batched_coverage(
+            self, agent_coords: np.ndarray, coverage_radii: np.ndarray
+    ) -> np.ndarray:
+        """
+        Returns (N,) int32 per-agent user counts.
+        Now derived from compute_coverage_matrix() for single source of truth.
         """
         if self.eval_mode:
             return self._compute_pywisim_coverage_eval(agent_coords, coverage_radii)
-
-        # --- HIGH-SPEED TRAINING ROUTINE ---
-        # 1. Expand dimensions to broadcast agents against users
-        # agent_coords[:, None, :] -> shape (N, 1, 2)
-        # self.user_coords[None, :, :] -> shape (1, M, 2)
-        # diff shape -> (N, M, 2)
-        diff = agent_coords[:, None, :] - self.user_coords[None, :, :]
-
-        # 2. Compute Euclidean distance matrix using fast C-level operations
-        # distances shape -> (N, M)
-        distances = np.linalg.norm(diff, axis=2)
-
-        # 3. Broadcast comparison against radii thresholds
-        # coverage_radii[:, None] shape -> (N, 1)
-        # within_radius shape -> (N, M) boolean matrix
-        within_radius = distances <= coverage_radii[:, None]
-
-        # 4. Sum rows to yield the integer count of covered coordinates per agent
-        counts = np.sum(within_radius, axis=1, dtype=np.int32)
-        return counts
+        # Sum the boolean matrix along the user axis to get counts per agent
+        return self.compute_coverage_matrix(
+            agent_coords, coverage_radii
+        ).sum(axis=1, dtype=np.int32)
 
     def _compute_pywisim_coverage_eval(self, agent_coords: np.ndarray, coverage_radii: np.ndarray) -> np.ndarray:
         """

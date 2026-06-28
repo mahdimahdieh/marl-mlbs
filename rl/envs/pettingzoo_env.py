@@ -60,17 +60,22 @@ class CoverageParallelEnv(ParallelEnv):
         return obs, infos
 
     def step(self, actions: Dict[str, int]) -> Tuple[
-        Dict[str, np.ndarray], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Any]]:
-
-        # --- PHASE 1: PHYSICS & MOVEMENT ---
+        Dict[str, np.ndarray], Dict[str, float],
+        Dict[str, bool], Dict[str, bool], Dict[str, Any]
+    ]:
+        # ------------------------------------------------------------------ #
+        # PHASE 1: PHYSICS & MOVEMENT                                         #
+        # ------------------------------------------------------------------ #
         self._apply_actions(actions)
 
-        # --- PHASE 2: SPATIAL VECTORIZATION ---
+        # ------------------------------------------------------------------ #
+        # PHASE 2: SPATIAL VECTORIZATION                                      #
+        # Build aligned arrays; index i corresponds to self.agents[i]         #
+        # ------------------------------------------------------------------ #
         agent_coords = []
         coverage_radii = []
-        agent_mapping = []  # Maps array index back to specific agent objects
+        agent_mapping = []
 
-        # Extract physical world coordinates for vectorized batched calculation
         for agent_id in self.agents:
             agent_obj, is_vbs = self._get_agent_obj(agent_id)
             x, y = self._calculate_world_coords(agent_obj, is_vbs)
@@ -78,33 +83,72 @@ class CoverageParallelEnv(ParallelEnv):
             coverage_radii.append(agent_obj.coverage_radius)
             agent_mapping.append(agent_obj)
 
-        # Execute C-level NumPy broadcasting for coverage (sub-millisecond)
-        np_coords = np.array(agent_coords, dtype=np.float32)
-        np_radii = np.array(coverage_radii, dtype=np.float32)
-        coverage_counts = self.sim_adapter.compute_batched_coverage(np_coords, np_radii)
+        np_coords = np.array(agent_coords, dtype=np.float32)  # (N, 2)
+        np_radii = np.array(coverage_radii, dtype=np.float32)  # (N,)
 
-        # Update objects
+        # Request the full (N_agents, N_users) boolean matrix.
+        # DO NOT collapse to counts here — Phase 3 needs user-level resolution.
+        coverage_matrix = self.sim_adapter.compute_coverage_matrix(
+            np_coords, np_radii
+        )  # shape: (N, M) bool
+
+        # Derive per-agent counts from the matrix for AgentManager state tracking
+        coverage_counts = coverage_matrix.sum(axis=1, dtype=np.int32)
         for obj, count in zip(agent_mapping, coverage_counts):
             obj.current_coverage_count = int(count)
 
-        # --- PHASE 3: DIFFERENTIAL REWARD ENGINEERING ---
-        # AgentManager handles the math: Global Efficiency - Local Efficiency
-        raw_rewards = self.agent_manager.compute_differential_rewards()
-        rewards = {agent: raw_rewards[self._get_raw_id(agent)] for agent in self.agents}
+        # ------------------------------------------------------------------ #
+        # PHASE 3: DIFFERENTIAL REWARD ENGINEERING                            #
+        #                                                                      #
+        # True marginal contribution:                                          #
+        #   reward_i = P(user covered | ALL agents)                           #
+        #            - P(user covered | all agents EXCEPT i)                  #
+        #                                                                      #
+        # This requires the (N, M) matrix — aggregate counts are insufficient. #
+        # ------------------------------------------------------------------ #
+        total_users = self.sim_adapter.num_users
+        n_agents = len(self.agents)
 
-        # --- PHASE 4: HORIZON & TERMINATION ---
+        # Union of all agent coverages — which users are covered at all?
+        # any_covered shape: (M,) bool
+        any_covered = np.any(coverage_matrix, axis=0)
+        total_covered = int(any_covered.sum())
+
+        rewards = {}
+        for i, agent_id in enumerate(self.agents):
+            if n_agents > 1:
+                # Counterfactual: boolean mask excluding agent i
+                others_mask = np.ones(n_agents, dtype=bool)
+                others_mask[i] = False
+                # Which users would still be covered without agent i?
+                covered_without_i = int(
+                    np.any(coverage_matrix[others_mask], axis=0).sum()
+                )
+            else:
+                # Solo agent: full credit for all coverage it provides
+                covered_without_i = 0
+
+            # Marginal contribution ∈ [0.0, 1.0]
+            # Numerically stable: no NaN risk since total_users > 0 is enforced
+            rewards[agent_id] = float(
+                (total_covered - covered_without_i) / max(total_users, 1)
+            )
+
+        # ------------------------------------------------------------------ #
+        # PHASE 4: HORIZON & TERMINATION                                       #
+        # ------------------------------------------------------------------ #
         self.step_count += 1
         env_truncation = self.step_count >= self.max_cycles
-        # Define termination condition (e.g., system efficiency hits 95%)
         env_termination = self.agent_manager.get_total_efficiency() >= 0.95
 
         terminations = {agent: env_termination for agent in self.agents}
         truncations = {agent: env_truncation for agent in self.agents}
 
-        # --- PHASE 5: OBSERVATIONS & MASKS ---
+        # ------------------------------------------------------------------ #
+        # PHASE 5: OBSERVATIONS & MASKS                                        #
+        # ------------------------------------------------------------------ #
         obs, infos = self._compute_observations_and_masks()
 
-        # Standard PettingZoo cleanup for completed episodes
         if env_termination or env_truncation:
             self.agents = []
 
