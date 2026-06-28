@@ -108,19 +108,31 @@ class HeterogeneousPPOManager:
         if "masks" in batch_data and batch_data["masks"]:
             b_masks = torch.stack(batch_data["masks"]).to(self.device)
 
+        # --- CRITICAL SANITY CHECK ---
+        # Ensure all buffer tensors have the exact same batch dimension size
+        dataset_size = b_obs.shape[0]
+        for name, tensor in [("actions", b_actions), ("logprobs", b_logprobs),
+                             ("advantages", b_advantages), ("returns", b_returns), ("values", b_values)]:
+            if tensor.shape[0] != dataset_size:
+                raise ValueError(
+                    f"Size mismatch: 'obs' has size {dataset_size}, but '{name}' has size {tensor.shape[0]}. "
+                    f"Check your rollout accumulation in main.py!")
+
         # Normalize advantages inside the target sub-batch to zero-out rollout structural variance
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-        dataset_size = b_obs.shape[0]
-        indices = np.arange(dataset_size)
+        # FIX: Generate indices directly as a PyTorch LongTensor on the GPU device
+        indices = torch.arange(dataset_size, device=self.device)
 
         for epoch in range(ppo_epochs):
-            np.random.shuffle(indices)
+            # FIX: Use PyTorch's native randperm to shuffle indices cleanly on the GPU
+            indices = indices[torch.randperm(dataset_size)]
+
             for start in range(0, dataset_size, batch_size):
                 end = start + batch_size
                 mb_idx = indices[start:end]
 
-                # Extract slices
+                # Extract slices (now safe and entirely on GPU device memory)
                 mb_obs = b_obs[mb_idx]
                 mb_actions = b_actions[mb_idx]
                 mb_logprobs = b_logprobs[mb_idx]

@@ -132,8 +132,9 @@ def main():
             # Step the parallel environment
             next_obs_dict, rewards_dict, terminations, truncations, next_infos_dict = env.step(actions)
 
-            # Store Rewards
-            for agent_id in env.agents:
+            # FIX: Loop over actions.keys() instead of env.agents to guarantee
+            # rewards are captured for agents that terminated/truncated during this step.
+            for agent_id in actions.keys():
                 agent_type = "vbs" if "vbs" in agent_id else "fbs"
                 buffers[agent_type][agent_id]["rewards"].append(rewards_dict[agent_id])
                 episode_reward += rewards_dict[agent_id]
