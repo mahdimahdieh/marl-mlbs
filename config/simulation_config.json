@@ -3,6 +3,10 @@
         "max_cycles": 100,
         "num_users": 400
     },
+    "graph_settings": {
+        "center_node_id": 0,
+        "max_slots_per_branch": 10
+    },
     "vbs_agents": [
         {
             "id": 0,
