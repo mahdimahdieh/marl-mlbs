@@ -31,12 +31,13 @@ class BaseStation:
 @dataclass
 class FlyingBaseStation(BaseStation):
     host_vbs_id: int = None
-
+    maximum_distance: int = None
     # Action Space: 0 to 16
     # 0: Hover
     # 1-8: N, NE, E, SE, S, SW, W, NW (Half Distance)
     # 9-16: N, NE, E, SE, S, SW, W, NW  (Full Distance)
     current_offset_zone: int = 0
+
 
     def reset_state(self):
         super().reset_state()

@@ -191,7 +191,7 @@ class CoverageParallelEnv(ParallelEnv):
             angle_idx = (agent_obj.current_offset_zone - 1) % 8
             angle = angle_idx * (np.pi / 4)  # 45 degrees step
 
-            radius = agent_obj.coverage_radius * dist_multiplier  # Max tether distance
+            radius = agent_obj.maximum_distance * dist_multiplier  # Max tether distance
             return hx + radius * np.cos(angle), hy + radius * np.sin(angle)
 
     def _compute_observations_and_masks(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:

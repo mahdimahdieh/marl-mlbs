@@ -38,7 +38,8 @@ def bootstrap_environment(config_path: str, graph_path: str):
             id=f_cfg["id"],
             host_vbs_id=f_cfg["host_vbs_id"],
             capacity=f_cfg["capacity"],
-            coverage_radius=f_cfg["coverage_radius"]
+            coverage_radius=f_cfg["coverage_radius"],
+            maximum_distance=f_cfg["maximum_distance"],
         )
         manager.register_fbs(fbs)
 
