@@ -5,14 +5,14 @@
         "map_dim": [100.0, 100.0]
     },
     "nodes": [
-        {"id": 0, "x": 0.0, "y": 70.0},
-        {"id": 1, "x": 30.0, "y": 50.0},
+        {"id": 0, "x": 30.0, "y": 50.0},
+        {"id": 1, "x": 0.0,  "y": 70.0},
         {"id": 2, "x": 100.0, "y": 50.0},
         {"id": 3, "x": 15.0, "y": 25.0}
     ],
     "links": [
-        {"source": 1, "target": 0, "type": "line", "params": {}},
-        {"source": 1, "target": 2, "type": "line", "params": {}},
-        {"source": 1, "target": 3, "type": "line", "params": {}}
+        {"source": 0, "target": 1, "type": "line", "params": {}},
+        {"source": 0, "target": 2, "type": "line", "params": {}},
+        {"source": 0, "target": 3, "type": "line", "params": {}}
     ]
 }
