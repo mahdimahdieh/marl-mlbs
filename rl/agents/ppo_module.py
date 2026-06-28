@@ -63,16 +63,26 @@ class HeterogeneousPPOManager:
     to completely avoid weight pollution.
     """
 
-    def __init__(self, vbs_obs_dim: int, fbs_obs_dim: int, lr: float = 3e-4, device: str = "cpu"):
+    def __init__(
+        self,
+        vbs_obs_dim: int,
+        fbs_obs_dim: int,
+        vbs_action_dim: int,    # FIXED: was hardcoded as literal 3 inside the class body
+        fbs_action_dim: int,    # FIXED: was hardcoded as literal 17 inside the class body
+        lr: float = 3e-4,
+        device: str = "cpu"
+    ):
         self.device = torch.device(device)
 
-        # VBS Action Space = 3 (Graph Edge Navigation)
-        self.vbs_net = DiscreteActorCritic(vbs_obs_dim, 3).to(self.device)
-        # FBS Action Space = 17 (0: Hover, 1-8: Half-Dist, 9-16: Full-Dist)
-        self.fbs_net = DiscreteActorCritic(fbs_obs_dim, 17).to(self.device)
+        # Action dims are now injected at construction time from the live env
+        # (see main.py fix: vbs_action_dim = env.action_space(vbs_agent_id).n).
+        # Any graph topology change or FBS action space redesign propagates automatically.
+        self.vbs_net = DiscreteActorCritic(vbs_obs_dim, vbs_action_dim).to(self.device)
+        self.fbs_net = DiscreteActorCritic(fbs_obs_dim, fbs_action_dim).to(self.device)
 
         self.vbs_optimizer = optim.Adam(self.vbs_net.parameters(), lr=lr, eps=1e-5)
         self.fbs_optimizer = optim.Adam(self.fbs_net.parameters(), lr=lr, eps=1e-5)
+
 
     def get_action(self, obs: torch.Tensor, agent_type: str, action_mask: torch.Tensor = None) -> Tuple[
         int, float, float]:
