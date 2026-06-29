@@ -68,20 +68,30 @@ def run_inference(config_path: str, graph_path: str, model_weights_path: str = N
             # FIX 3: Strip the tensor back to a native Python int so PettingZoo can process it
             actions[agent_id] = action.cpu().item() if hasattr(action, "item") else action
 
-        # Step Environment (Now using real PyWiSim 5G SINR math)
         obs_dict, rewards_dict, terminations, truncations, infos_dict = env.step(actions)
         step += 1
 
-        # Render the frame
-        renderer.render(env, step)
+        # CRITICAL: Detect termination and reset BEFORE rendering.
+        # env.step() clears env.agents=[] as part of its own call stack.
+        # Resetting here restores env.agents so the renderer always sees valid agent state.
+        #
+        # Guard: bool(terminations) prevents all() returning True on an empty dict,
+        # which would incorrectly trigger a reset at step 1 on a fresh episode.
+        episode_done = (
+                               bool(terminations) and all(terminations.values())
+                       ) or (
+                               bool(truncations) and all(truncations.values())
+                       )
 
-        # Control playback speed (2 frames per second)
-        time.sleep(0.5)
-
-        if all(terminations.values()) or all(truncations.values()):
-            print(f"Episode completed. Final Efficiency: {env.agent_manager.get_total_efficiency():.2%}")
-            obs_dict, infos_dict = env.reset()
+        if episode_done:
+            eff = env.agent_manager.get_total_efficiency()
+            print(f"Episode completed at step {step}. Final Efficiency: {eff:.2%}")
+            obs_dict, infos_dict = env.reset()  # ← Restores env.agents BEFORE render call
             step = 0
+
+        # Now safe: env.agents is always populated (either mid-episode or freshly reset)
+        renderer.render(env, step)
+        time.sleep(0.5)
 
     # FIX 4: Call native pygame shutdown
     pygame.quit()
