@@ -11,7 +11,9 @@ class BaseStation:
     capacity: int
     coverage_radius: float
 
-    # Track coverage as an integer count
+    # RAW count from coverage_matrix.sum(axis=1). May double-count users covered
+    # by multiple stations simultaneously. Used for capacity headroom tracking and
+    # visualisation ONLY — never pass this to reward or termination logic.
     current_coverage_count: int = 0
 
     @property
@@ -19,8 +21,12 @@ class BaseStation:
         return self.current_coverage_count >= self.capacity
 
     def get_coverage_efficiency(self) -> float:
+        """
+        Per-station capacity saturation [0.0, 1.0]. Diagnostic only.
+        This is NOT the RL objective. A station can be "full" while the network
+        covers only a small fraction of the user population.
+        """
         if self.capacity > 0:
-            # STRICT FIX: Clamp the efficiency to [0.0, 1.0] max.
             return min(self.current_coverage_count, self.capacity) / self.capacity
         return 0.0
 
@@ -81,6 +87,32 @@ class AgentManager:
             vbs.reset_state()
         for fbs in self.fbs_registry.values():
             fbs.reset_state()
+
+    def get_capacity_utilization(self) -> float:
+        """
+        DIAGNOSTIC ONLY — this is NOT the RL objective.
+
+        Returns the fraction of total station capacity that is filled, including
+        double-counted users. This metric saturates to 1.0 immediately at step 1
+        whenever the number of users in range exceeds any station's capacity limit,
+        even if only a tiny fraction of total users are uniquely covered.
+
+        True Network Coverage Efficiency — the actual RL objective — is:
+            unique_users_covered (set-union) / total_users
+        This is maintained by CoverageParallelEnv as `env.last_true_coverage`.
+        """
+        total_capacity = (
+            sum(v.capacity for v in self.vbs_registry.values()) +
+            sum(f.capacity for f in self.fbs_registry.values())
+        )
+        if total_capacity <= 0:
+            return 0.0
+
+        total_filled = (
+            sum(min(v.current_coverage_count, v.capacity) for v in self.vbs_registry.values()) +
+            sum(min(f.current_coverage_count, f.capacity) for f in self.fbs_registry.values())
+        )
+        return total_filled / total_capacity
 
     def get_total_efficiency(self) -> float:
         # STRICT FIX: Sum the clamped efficiencies, not the raw counts,
