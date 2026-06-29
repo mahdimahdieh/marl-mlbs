@@ -214,12 +214,19 @@ def main():
         if episode % 10 == 0:
             metrics = {
                 "Episode_Reward": episode_reward,
-                "System_Efficiency": final_efficiency,
+                # True network coverage: unique users covered / total users
+                "True_Coverage": final_efficiency,
+                # Capacity utilization diagnostic (should be high but is NOT the objective)
+                "Capacity_Utilization": env_config["agent_manager"].get_capacity_utilization(),
                 "Episode_Length": env.step_count
             }
             tracker.log_episode(metrics, step=episode)
-            print(f"Episode: {episode} | Eff: {final_efficiency:.2%} | Reward: {episode_reward:.2f}")
-
+            print(
+                f"Episode: {episode:4d} | "
+                f"Coverage: {final_efficiency:.2%} | "
+                f"Reward: {episode_reward:.2f} | "
+                f"Length: {env.step_count}"
+            )
     tracker.close()
     print("Training Complete. Models ready for PyWiSim Evaluation.")
 
