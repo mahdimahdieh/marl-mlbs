@@ -151,7 +151,6 @@ class CoverageParallelEnv(ParallelEnv):
         MARGINAL_WEIGHT = 0.65        # Individual Shapley-value approximation
         TEAM_WEIGHT = 0.3            # Shared cooperative gradient
         OVERLAP_PENALTY_WEIGHT = 0.05 # Explicit redundancy suppressor
-        EXPLORATION_WEIGHT = 0.05
 
         rewards = {}
         for i, agent_id in enumerate(self.agents):
@@ -190,14 +189,6 @@ class CoverageParallelEnv(ParallelEnv):
                 total_covered - covered_without_i
             ) / float(max(total_users, 1))
 
-            # Dense positioning signal: reward VBS proportionally for how far it has
-            # committed along an edge. This breaks the 10-step sequential credit
-            # assignment problem by giving gradient at every step, not just terminal states.
-            # agent_mapping[i] is guaranteed to match self.agents[i] (built in PHASE 2).
-            if "vbs" in agent_id:
-                vbs_progress_bonus = agent_mapping[i].current_slot_index / float(self.max_slot_per_branch)
-            else:
-                vbs_progress_bonus = 0.0
 
             # Final blended reward. The overlap_penalty term is SEPARATE from the
             # marginal term: marginal punishes redundancy by reducing the reward to 0,
@@ -207,7 +198,6 @@ class CoverageParallelEnv(ParallelEnv):
             rewards[agent_id] = REWARD_SCALE * (
                 MARGINAL_WEIGHT * marginal_contribution
                 + TEAM_WEIGHT * true_coverage_efficiency
-                + EXPLORATION_WEIGHT * vbs_progress_bonus
                 - OVERLAP_PENALTY_WEIGHT * overlap_ratio
             )
 

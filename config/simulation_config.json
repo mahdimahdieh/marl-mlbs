@@ -1,7 +1,7 @@
 {
     "env_settings": {
         "max_cycles": 100,
-        "num_users": 200
+        "num_users": 1000
     },
     "graph_settings": {
         "center_node_id": 0,

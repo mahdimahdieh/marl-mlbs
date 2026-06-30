@@ -34,18 +34,16 @@ def run_inference(config_path: str, graph_path: str, model_dir: str = None):
     )
 
     if model_dir:
-        weights_dir = os.path.join(model_dir, "files")
-
-        vbs_path = os.path.join(weights_dir, "model_vbs.pt")
-        fbs_path = os.path.join(weights_dir, "model_fbs.pt")
+        vbs_path = os.path.join(model_dir, "vbs_net.pt")
+        fbs_path = os.path.join(model_dir, "fbs_net.pt")
 
         # Guard clause to ensure the files actually exist there
         if os.path.exists(vbs_path) and os.path.exists(fbs_path):
             ppo.vbs_net.load_state_dict(torch.load(vbs_path, map_location=device))
             ppo.fbs_net.load_state_dict(torch.load(fbs_path, map_location=device))
-            print(f"🔥 Successfully loaded local W&B weights from: {weights_dir}")
+            print(f"Successfully loaded local W&B weights from: {model_dir}")
         else:
-            print(f"⚠️ Error: Weights not found in {weights_dir}")
+            print(f"Error: Weights not found in {model_dir}")
             print("Make sure 'model_vbs.pt' and 'model_fbs.pt' are inside that folder.")
             print("Running with UNTRAINED policy fallback.")
     else:
@@ -81,10 +79,8 @@ def run_inference(config_path: str, graph_path: str, model_dir: str = None):
                     bool(truncations) and all(truncations.values()))
 
         if episode_done:
-            eff = env.agent_manager.get_total_efficiency()
-            print(f"Episode completed at step {step}. Final Efficiency: {eff:.2%}")
-            obs_dict, infos_dict = env.reset()
-            step = 0
+            eff = env.last_true_coverage   # unique-user coverage, not capacity saturation
+            print(f"Episode completed at step {step}. True Coverage: {eff:.2%}")
 
         renderer.render(env, step)
         time.sleep(0.5)
@@ -94,7 +90,7 @@ def run_inference(config_path: str, graph_path: str, model_dir: str = None):
 
 if __name__ == "__main__":
     # Pointing directly to your local latest-run directory
-    LATEST_MODEL = "./models"
+    LATEST_MODEL = "./models/20260630-090146"
 
     run_inference(
         config_path="config/simulation_config.json",

@@ -4,6 +4,7 @@ import argparse
 from typing import Dict, List, Any
 import os
 import datetime
+from collections import deque
 
 # Core & Infrastructure
 from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseStation
@@ -156,6 +157,13 @@ def main():
     save_dir = os.path.join(args.save_dir, data_time)
     os.mkdir(save_dir)
 
+    reward_window = deque(maxlen=100)  # last 100 episodes
+    coverage_window = deque(maxlen=100)
+
+    reward_window.append(0.)
+    coverage_window.append(0.)
+
+
     # 2. Training Loop
     for episode in range(1, args.episodes + 1):
         obs_dict, infos_dict = env.reset(seed=episode)
@@ -207,7 +215,19 @@ def main():
 
         # --- OPTIMIZATION PHASE ---
         # Compile global metrics
-        final_efficiency = env_config["agent_manager"].get_total_efficiency()
+        #
+        # CRITICAL: env.last_true_coverage is the unique-user set-union metric
+        # computed in CoverageParallelEnv.step() Phase 3:
+        #     any_covered_mask = np.any(coverage_matrix, axis=0)   # per-USER, not per-station
+        #     true_coverage = unique_users_covered / total_users
+        #
+        # agent_manager.get_total_efficiency() is a DIFFERENT metric — per-station
+        # capacity saturation (sum(min(count, capacity)) / sum(capacity)). It
+        # double-counts users seen by multiple overlapping stations and clamps
+        # each station's contribution at its own capacity, so it can read 100%
+        # while only a small fraction of the actual user population is covered.
+        # That is what was producing the 20%-covered-but-100%-reported symptom.
+        final_efficiency = env.last_true_coverage  # was: env_config["agent_manager"].get_total_efficiency()
 
         batch_vbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "returns": [], "values": [],
                      "masks": []}
@@ -241,21 +261,29 @@ def main():
             ppo.update_policy(batch_fbs, "fbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
                               vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
+        reward_window.append(episode_reward)
+        coverage_window.append(final_efficiency)
+
         # --- LOGGING PHASE ---
         if episode % 10 == 0:
+            roll_reward_mean = sum(reward_window) / len(reward_window)
+            roll_coverage_mean = sum(coverage_window) / len(coverage_window)
+
             metrics = {
                 "Episode_Reward": episode_reward,
                 # True network coverage: unique users covered / total users
                 "True_Coverage": final_efficiency,
                 # Capacity utilization diagnostic (should be high but is NOT the objective)
                 "Capacity_Utilization": env_config["agent_manager"].get_capacity_utilization(),
-                "Episode_Length": env.step_count
+                "Episode_Length": env.step_count,
+                "Rolling100_Reward": roll_reward_mean,
+                "Rolling100_Coverage": roll_coverage_mean,
             }
             tracker.log_episode(metrics, step=episode)
             print(
                 f"Episode: {episode:4d} | "
-                f"Coverage: {final_efficiency:.2%} | "
-                f"Reward: {episode_reward:.2f} | "
+                f"Coverage: {final_efficiency:.2%} (avg100: {roll_coverage_mean:.2%}) | "
+                f"Reward: {episode_reward:.2f} (avg100: {roll_reward_mean:.2f}) | "
                 f"Length: {env.step_count}"
             )
         if episode % args.save_every == 0:
