@@ -14,7 +14,7 @@ except ImportError:
 
 class TensorBoardTracker(TrackingABC):
     """
-    Lightweight TensorBoard wrapper matching WandbTracker's public interface.
+    Lightweight TensorBoard wrapper matching public interface.
 
     Produces three types of TensorBoard artefacts:
       SCALARS  — one chart per metric key, timestep-aligned   (log_episode)
@@ -34,13 +34,12 @@ class TensorBoardTracker(TrackingABC):
     ) -> None:
         """
         Args:
-            project_name: Creates a subdirectory under log_dir/ (mirrors WandB project)
+            project_name: Creates a subdirectory under log_dir/
             config:       Full simulation config dict — logged to the TEXT tab
             run_name:     Experiment label appended to the log path
             log_dir:      Root log directory; default "runs/" in the project root
         """
         tag = run_name or "default"
-        # Mirrors the WandB project/run nesting:  runs/<project>/<run>/
         self.log_path = os.path.join(log_dir, project_name, tag)
         self.writer = SummaryWriter(log_dir=self.log_path)
 

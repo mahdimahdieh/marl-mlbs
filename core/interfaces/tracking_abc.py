@@ -3,7 +3,7 @@ from typing import Dict, Any
 
 
 class TrackingABC(ABC):
-    """Contract for WandB / Metrics tracking."""
+    """Contract for Metrics tracking."""
 
     @abstractmethod
     def log_episode(self, metrics: Dict[str, float], step: int) -> None:

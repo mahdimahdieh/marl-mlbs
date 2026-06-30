@@ -3,6 +3,7 @@ import torch
 import argparse
 from typing import Dict, List, Any
 import os
+import datetime
 
 # Core & Infrastructure
 from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseStation
@@ -150,7 +151,11 @@ def main():
         config=raw_config,
         run_name="PPO-Y-Graph-MVP"
     )
-    
+
+    data_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    save_dir = os.path.join(args.save_dir, data_time)
+    os.mkdir(save_dir)
+
     # 2. Training Loop
     for episode in range(1, args.episodes + 1):
         obs_dict, infos_dict = env.reset(seed=episode)
@@ -254,9 +259,9 @@ def main():
                 f"Length: {env.step_count}"
             )
         if episode % args.save_every == 0:
-            _save_models(ppo, args.save_dir, episode)
+            _save_models(ppo, save_dir, episode)
 
-    _save_models(ppo, args.save_dir, args.episodes)  # Final save regardless of cadence
+    _save_models(ppo, save_dir, args.episodes)  # Final save regardless of cadence
     print("Training Complete. Models saved. Run inference.py to visualize.")
     tracker.close()
     print("Training Complete. Models ready for PyWiSim Evaluation.")

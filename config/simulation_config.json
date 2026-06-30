@@ -1,7 +1,7 @@
 {
     "env_settings": {
         "max_cycles": 100,
-        "num_users": 100
+        "num_users": 200
     },
     "graph_settings": {
         "center_node_id": 0,
@@ -11,27 +11,27 @@
         {
             "id": 0,
             "capacity": 20,
-            "coverage_radius": 20.0
+            "coverage_radius": 15.0
         },
         {
             "id": 1,
             "capacity": 20,
-            "coverage_radius": 20.0
+            "coverage_radius": 15.0
         },
                 {
             "id": 2,
             "capacity": 20,
-            "coverage_radius": 20.0
+            "coverage_radius": 15.0
         },
                 {
             "id": 3,
             "capacity": 20,
-            "coverage_radius": 20.0
+            "coverage_radius": 15.0
         },
                 {
             "id": 4,
             "capacity": 20,
-            "coverage_radius": 20.0
+            "coverage_radius": 15.0
         }
     ],
     "fbs_agents": [
@@ -39,36 +39,36 @@
             "id": 5,
             "host_vbs_id": 0,
             "capacity": 20,
-            "coverage_radius": 40.0,
-            "maximum_distance": 20.0
+            "coverage_radius": 35.0,
+            "maximum_distance": 15.0
         },
         {
             "id": 6,
             "host_vbs_id": 1,
             "capacity": 20,
-            "coverage_radius": 40.0,
-            "maximum_distance": 20.0
+            "coverage_radius": 35.0,
+            "maximum_distance": 15.0
         },
         {
             "id": 7,
             "host_vbs_id": 2,
             "capacity": 20,
-            "coverage_radius": 40.0,
-            "maximum_distance": 20.0
+            "coverage_radius": 35.0,
+            "maximum_distance": 15.0
         },
         {
             "id": 8,
             "host_vbs_id": 3,
             "capacity": 20,
-            "coverage_radius": 40.0,
-            "maximum_distance": 20.0
+            "coverage_radius": 35.0,
+            "maximum_distance": 15.0
         },
                 {
             "id": 9,
             "host_vbs_id": 4,
             "capacity": 20,
-            "coverage_radius": 40.0,
-            "maximum_distance": 20.0
+            "coverage_radius": 35.0,
+            "maximum_distance": 15.0
         }
     ],
     "hyperparameters": {

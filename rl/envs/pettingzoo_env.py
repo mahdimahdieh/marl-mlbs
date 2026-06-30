@@ -147,10 +147,10 @@ class CoverageParallelEnv(ParallelEnv):
         #   Optimal spread (~40% unique): ~(1.04) per step  ← positive convergence target
         #
         # Tune these three weights as hyperparameters if the graph layout changes:
-        REWARD_SCALE = 10.0          # Scales reward to [≈-7.3, ≈10.4] — stable for PPO clip=0.2
-        MARGINAL_WEIGHT = 0.6        # Individual Shapley-value approximation
-        TEAM_WEIGHT = 0.2            # Shared cooperative gradient
-        OVERLAP_PENALTY_WEIGHT = 0.2 # Explicit redundancy suppressor
+        REWARD_SCALE = 1.0          # Scales reward to [≈-7.3, ≈10.4] — stable for PPO clip=0.2
+        MARGINAL_WEIGHT = 0.65        # Individual Shapley-value approximation
+        TEAM_WEIGHT = 0.3            # Shared cooperative gradient
+        OVERLAP_PENALTY_WEIGHT = 0.05 # Explicit redundancy suppressor
         EXPLORATION_WEIGHT = 0.05
 
         rewards = {}

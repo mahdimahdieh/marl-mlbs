@@ -12,7 +12,7 @@ marl_network_sim/
 │   │   ├── pywisim                 # PyWiSim submodule cloned from gitlab
 │   │   └── pywisim_adapter.py      # PyWiSim implementation of network_sim_abc
 │   └── tracking/
-│       └── wandb_tracker.py        # Metrics and diagramming via Weights & Biases / Matplotlib
+│       └── tensorboard_tracker.py  # Metrics and diagramming via Tensorboard
 ├── rl/                             # The Reinforcement Learning layer
 │   ├── envs/
 │   │   └── pettingzoo_env.py       # ParallelEnv wrapper injecting the ABCs
