@@ -1,5 +1,4 @@
 import json
-import numpy as np
 import torch
 import argparse
 from typing import Dict, List, Any
@@ -9,7 +8,7 @@ import os
 from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseStation
 from infrastructure.graph.networkx_engine import NetworkXRoadEngine
 from infrastructure.simulation.pywisim_adapter import PyWiSimAdapter
-from infrastructure.tracking.wandb_tracker import WandbTracker
+from infrastructure.tracking.tensorboard_tracker import TensorBoardTracker
 
 # RL Layers
 from rl.envs.pettingzoo_env import CoverageParallelEnv
@@ -146,7 +145,7 @@ def main():
         device=device
     )
 
-    tracker = WandbTracker(
+    tracker = TensorBoardTracker(
         project_name="MARL-Network-Sim",
         config=raw_config,
         run_name="PPO-Y-Graph-MVP"
