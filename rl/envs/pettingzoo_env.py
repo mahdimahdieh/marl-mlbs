@@ -24,6 +24,7 @@ class CoverageParallelEnv(ParallelEnv):
 
         self.max_cycles = config.get("max_cycles", 100)
         self.map_dim = self.graph_engine.get_map_dimension()
+        self.max_slot_per_branch = float(config.get("max_slot_per_branch", 10))
 
         self.possible_agents = (
             [f"vbs_{v.id}" for v in self.agent_manager.vbs_registry.values()] +
@@ -42,11 +43,16 @@ class CoverageParallelEnv(ParallelEnv):
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
-        # [norm_x, norm_y, raw_coverage_frac]
-        # raw_coverage_frac = users within this agent's radius / total_users
-        # This does NOT saturate like cap_ratio did. FBS starting at center gives ~0.63,
-        # not 1.0, so the observation carries a real gradient from the first step.
-        return spaces.Box(low=0.0, high=1.0, shape=(3,), dtype=np.float32)
+        if "vbs" in agent:
+            # [norm_x, norm_y, coverage_frac, norm_slot_idx,
+            #  branch_0_hot, branch_1_hot, branch_2_hot]
+            # norm_slot_idx: 0.0=at center, 1.0=at edge terminus
+            # branch_hot:    one-hot for active branch; all-zeros when at center (slot==0)
+            return spaces.Box(low=0.0, high=1.0, shape=(7,), dtype=np.float32)
+        else:
+            # [norm_x, norm_y, coverage_frac, norm_offset_zone]
+            # norm_offset_zone: current polar zone / 16 → tells FBS which half-/full-dist ring it's in
+            return spaces.Box(low=0.0, high=1.0, shape=(4,), dtype=np.float32)
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Discrete:
@@ -145,6 +151,7 @@ class CoverageParallelEnv(ParallelEnv):
         MARGINAL_WEIGHT = 0.6        # Individual Shapley-value approximation
         TEAM_WEIGHT = 0.2            # Shared cooperative gradient
         OVERLAP_PENALTY_WEIGHT = 0.2 # Explicit redundancy suppressor
+        EXPLORATION_WEIGHT = 0.05
 
         rewards = {}
         for i, agent_id in enumerate(self.agents):
@@ -183,6 +190,15 @@ class CoverageParallelEnv(ParallelEnv):
                 total_covered - covered_without_i
             ) / float(max(total_users, 1))
 
+            # Dense positioning signal: reward VBS proportionally for how far it has
+            # committed along an edge. This breaks the 10-step sequential credit
+            # assignment problem by giving gradient at every step, not just terminal states.
+            # agent_mapping[i] is guaranteed to match self.agents[i] (built in PHASE 2).
+            if "vbs" in agent_id:
+                vbs_progress_bonus = agent_mapping[i].current_slot_index / float(self.max_slot_per_branch)
+            else:
+                vbs_progress_bonus = 0.0
+
             # Final blended reward. The overlap_penalty term is SEPARATE from the
             # marginal term: marginal punishes redundancy by reducing the reward to 0,
             # while overlap_penalty actively pushes redundant agents negative —
@@ -191,8 +207,11 @@ class CoverageParallelEnv(ParallelEnv):
             rewards[agent_id] = REWARD_SCALE * (
                 MARGINAL_WEIGHT * marginal_contribution
                 + TEAM_WEIGHT * true_coverage_efficiency
+                + EXPLORATION_WEIGHT * vbs_progress_bonus
                 - OVERLAP_PENALTY_WEIGHT * overlap_ratio
             )
+
+
 
         # ------------------------------------------------------------------ #
         # PHASE 5: TERMINATION                                                #
@@ -254,26 +273,10 @@ class CoverageParallelEnv(ParallelEnv):
             return hx + radius * np.cos(angle), hy + radius * np.sin(angle)
 
     def _compute_observations_and_masks(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
-        """
-        Constructs per-agent observations and action masks.
-
-        Observation format: [norm_x, norm_y, raw_coverage_frac]
-
-        raw_coverage_frac replaces the old cap_ratio. The old cap_ratio was:
-            min(current_coverage_count, capacity) / capacity
-        which saturated to 1.0 at step 1 for every agent and gave PPO a blind third
-        dimension. raw_coverage_frac is:
-            agent_i_covered_users / total_users
-        This remains meaningful as agents spread: an FBS covering 63% of the map
-        when bunched reduces toward its unique coverage fraction as agents separate.
-
-        Index alignment guarantee: enumerate(self.agents) here produces the same
-        ordering as the for-loop in step() that built self.last_coverage_matrix,
-        so last_coverage_matrix[i] corresponds to self.agents[i].
-        """
         obs = {}
         infos = {}
         total_users = self.sim_adapter.num_users
+        MAX_ZONE = 16.0  # FBS zones 0–16
 
         for i, agent_id in enumerate(self.agents):
             agent_obj, is_vbs = self._get_agent_obj(agent_id)
@@ -282,25 +285,47 @@ class CoverageParallelEnv(ParallelEnv):
             norm_x = np.clip(x / self.map_dim[0], 0.0, 1.0)
             norm_y = np.clip(y / self.map_dim[1], 0.0, 1.0)
 
-            # Cold-start (reset() before first step): no matrix yet, use 0.0.
-            # Mid-episode: pull agent i's row from the step-N-1 snapshot.
+            # Coverage fraction — unchanged from original
             if (self.last_coverage_matrix is not None
                     and i < len(self.last_coverage_matrix)):
-                raw_coverage_frac = float(
-                    self.last_coverage_matrix[i].sum()
-                ) / float(max(total_users, 1))
-                raw_coverage_frac = np.clip(raw_coverage_frac, 0.0, 1.0)
+                raw_coverage_frac = np.clip(
+                    float(self.last_coverage_matrix[i].sum()) / float(max(total_users, 1)),
+                    0.0, 1.0
+                )
             else:
                 raw_coverage_frac = 0.0
 
-            obs[agent_id] = np.array(
-                [norm_x, norm_y, raw_coverage_frac], dtype=np.float32
-            )
-
-            mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
             if is_vbs:
-                if agent_obj.current_slot_index >= 10:
-                    mask[agent_obj.current_branch_id - 1] = 0
+                # How far along the chosen branch (0.0 = center, 1.0 = terminus)?
+                norm_slot = agent_obj.current_slot_index / self.max_slot_per_branch
+
+                # One-hot encode the active branch.
+                # CRITICAL: only encode branch when ACTUALLY on an edge (slot > 0).
+                # At slot 0 (center) branch_id may be stale from previous backtrack;
+                # all-zeros correctly signals "at center, no active commitment."
+                branch_hot = np.zeros(3, dtype=np.float32)
+                if agent_obj.current_slot_index > 0 and 1 <= agent_obj.current_branch_id <= 3:
+                    branch_hot[agent_obj.current_branch_id - 1] = 1.0
+
+                obs[agent_id] = np.array(
+                    [norm_x, norm_y, raw_coverage_frac,
+                     norm_slot,
+                     branch_hot[0], branch_hot[1], branch_hot[2]],
+                    dtype=np.float32
+                )
+            else:
+                # FBS: encode current polar zone so network knows its half/full-dist ring
+                norm_zone = agent_obj.current_offset_zone / MAX_ZONE
+                obs[agent_id] = np.array(
+                    [norm_x, norm_y, raw_coverage_frac, norm_zone],
+                    dtype=np.float32
+                )
+
+            # Action mask — prevent invalid forward move at terminus only.
+            # Backtracking remains legal at all slots (agent can choose to reroute).
+            mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
+            if is_vbs and agent_obj.current_slot_index >= 10:
+                mask[agent_obj.current_branch_id - 1] = 0  # Block moving past terminus
 
             infos[agent_id] = {"action_mask": mask}
 

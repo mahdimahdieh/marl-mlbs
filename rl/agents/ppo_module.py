@@ -182,3 +182,50 @@ class HeterogeneousPPOManager:
                 # Strict gradient norm clipping to safeguard against exploding graph updates
                 nn.utils.clip_grad_norm_(net.parameters(), max_norm=0.5)
                 optimizer.step()
+
+    def get_deterministic_action(
+            self,
+            obs: torch.Tensor,
+            agent_type: str,
+            action_mask: torch.Tensor = None,
+    ) -> int:
+        """
+        Greedy argmax policy for evaluation / inference.
+
+        CRITICAL DISTINCTION from get_action():
+          - get_action()              → probs.sample()  ← stochastic; ONLY for training rollouts
+          - get_deterministic_action()→ logits.argmax() ← greedy;    ONLY for inference
+
+        Calling sample() during inference produces the random-looking behavior the
+        user observed. Argmax collapses the categorical distribution to its mode,
+        producing consistent, reproducible agent decisions.
+
+        Args:
+            obs:         (obs_dim,) float32 tensor — single agent observation
+            agent_type:  "vbs" or "fbs"
+            action_mask: (action_dim,) float32 tensor — 1=legal, 0=masked
+
+        Returns:
+            int: the greedy legal action index
+        """
+        net = self.vbs_net if agent_type == "vbs" else self.fbs_net
+        net.eval()  # Disable dropout/batchnorm (safe; update_policy() re-enables .train())
+
+        with torch.no_grad():
+            # Only need the actor head — critic is irrelevant for action selection
+            logits = net.actor(obs.to(self.device))
+
+            if action_mask is not None:
+                action_mask = action_mask.to(self.device)
+                # Replace illegal action logits with -inf BEFORE argmax
+                # so masked actions can never win the greedy selection
+                logits = torch.where(
+                    action_mask.bool(),
+                    logits,
+                    torch.full_like(logits, -1e9),  # -inf proxy
+                )
+
+            # Greedy selection: no sampling, fully deterministic
+            action = logits.argmax(dim=-1)
+
+        return action.cpu().item()

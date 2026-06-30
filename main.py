@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import argparse
 from typing import Dict, List, Any
+import os
 
 # Core & Infrastructure
 from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseStation
@@ -80,11 +81,37 @@ def compute_gae(rewards: List[float], values: List[float], next_value: float, ga
     return advantages, returns
 
 
+def _save_models(ppo: "HeterogeneousPPOManager", save_dir: str, episode: int) -> None:
+    """
+    Persists both network state-dicts.
+
+    Two saves per call:
+      *_net.pt          — always-current 'latest' snapshot; inference.py default target
+      *_net_epN.pt      — tagged backup so we can roll back if reward spikes mid-training
+
+    Using state_dict() (not the full model) keeps files small and avoids
+    class-path binding issues when the codebase changes between checkpoint and load.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Latest snapshot (overwritten every checkpoint)
+    torch.save(ppo.vbs_net.state_dict(), os.path.join(save_dir, "vbs_net.pt"))
+    torch.save(ppo.fbs_net.state_dict(), os.path.join(save_dir, "fbs_net.pt"))
+
+    # Tagged backup for rollback
+    torch.save(ppo.vbs_net.state_dict(), os.path.join(save_dir, f"vbs_net_ep{episode}.pt"))
+    torch.save(ppo.fbs_net.state_dict(), os.path.join(save_dir, f"fbs_net_ep{episode}.pt"))
+
+    print(f"Checkpoint saved {save_dir}/*net.pt  [ep {episode}]")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train VBS/FBS Base Stations")
     parser.add_argument("--config", type=str, default="config/simulation_config.json")
     parser.add_argument("--graph", type=str, default="config/graph_map.json")
     parser.add_argument("--episodes", type=int, default=5000)
+    parser.add_argument("--save-dir",   type=str, default="models")
+    parser.add_argument("--save-every", type=int, default=250)
     args = parser.parse_args()
 
     env_config, hp, raw_config = bootstrap_environment(args.config, args.graph)
@@ -227,6 +254,11 @@ def main():
                 f"Reward: {episode_reward:.2f} | "
                 f"Length: {env.step_count}"
             )
+        if episode % args.save_every == 0:
+            _save_models(ppo, args.save_dir, episode)
+
+    _save_models(ppo, args.save_dir, args.episodes)  # Final save regardless of cadence
+    print("Training Complete. Models saved. Run inference.py to visualize.")
     tracker.close()
     print("Training Complete. Models ready for PyWiSim Evaluation.")
 
