@@ -135,8 +135,11 @@ class HeterogeneousPPOManager:
         indices = torch.arange(dataset_size, device=self.device)
 
         for epoch in range(ppo_epochs):
-            # FIX: Use PyTorch's native randperm to shuffle indices cleanly on the GPU
-            indices = indices[torch.randperm(dataset_size)]
+            # Generate the permutation directly on self.device: inherits the globally
+            # pinned generator deterministically, and avoids a CPU/CUDA index-tensor
+            # mismatch RuntimeError the moment device="cuda".
+            perm = torch.randperm(dataset_size, device=self.device)
+            indices = indices[perm]
 
             for start in range(0, dataset_size, batch_size):
                 end = start + batch_size

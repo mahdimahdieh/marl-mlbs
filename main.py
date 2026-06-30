@@ -11,6 +11,7 @@ from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseSta
 from infrastructure.graph.networkx_engine import NetworkXRoadEngine
 from infrastructure.simulation.pywisim_adapter import PyWiSimAdapter
 from infrastructure.tracking.tensorboard_tracker import TensorBoardTracker
+from infrastructure.training.determinism import lock_determinism
 
 # RL Layers
 from rl.envs.pettingzoo_env import CoverageParallelEnv
@@ -113,7 +114,13 @@ def main():
     parser.add_argument("--episodes", type=int, default=5000)
     parser.add_argument("--save-dir",   type=str, default="models")
     parser.add_argument("--save-every", type=int, default=250)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="seed for full reproducibility / overfitting baseline.")
+    parser.add_argument("--overfit", action="store_true",
+                        help="freeze the spatial distribution")
     args = parser.parse_args()
+
+    lock_determinism(args.seed)
 
     env_config, hp, raw_config = bootstrap_environment(args.config, args.graph)
     env = CoverageParallelEnv(env_config)
@@ -166,8 +173,9 @@ def main():
 
     # 2. Training Loop
     for episode in range(1, args.episodes + 1):
-        obs_dict, infos_dict = env.reset(seed=episode)
-
+        distribution_seed = args.seed if args.overfit else episode
+        obs_dict, infos_dict = env.reset(seed=distribution_seed)
+        
         # Isolated Buffers to prevent weight contamination
         buffers = {
             "vbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "values": [], "masks": []} for
@@ -199,6 +207,8 @@ def main():
                 buffers[agent_type][agent_id]["actions"].append(action)
                 buffers[agent_type][agent_id]["logprobs"].append(logprob)
                 buffers[agent_type][agent_id]["values"].append(value)
+
+
 
             # Step the parallel environment
             next_obs_dict, rewards_dict, terminations, truncations, next_infos_dict = env.step(actions)

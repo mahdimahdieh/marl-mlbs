@@ -46,6 +46,10 @@ class PyWiSimAdapter(NetworkSimABC):
             # for x, y in self.user_coords:
             #     ue = pywisim.UserEquipment(x=x, y=y)
             #     self.pywisim_env.register_ue(ue)
+            # AUDIT FLAG: once pywisim.WirelessEnv(...) is uncommented, it must be
+            # constructed with this same `seed` (e.g. WirelessEnv(..., rng_seed=seed)).
+            # Its internal channel/SINR RNG is currently unaccounted for and will
+            # reintroduce non-determinism the instant this path goes live.
             pass
 
     def compute_coverage_matrix(
