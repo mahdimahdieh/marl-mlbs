@@ -209,7 +209,15 @@ def main():
                 buffers[agent_type][agent_id]["logprobs"].append(logprob)
                 buffers[agent_type][agent_id]["values"].append(value)
 
-
+            vbs_feats, fbs_feats, global_extra = env.get_global_state()
+            step_value = ppo.get_value(
+                torch.tensor(vbs_feats, dtype=torch.float32).unsqueeze(0),
+                torch.tensor(fbs_feats, dtype=torch.float32).unsqueeze(0),
+                torch.tensor(global_extra, dtype=torch.float32).unsqueeze(0),
+            )
+            for agent_id in actions.keys():
+                agent_type = "vbs" if "vbs" in agent_id else "fbs"
+                buffers[agent_type][agent_id]["values"].append(step_value)
 
             # Step the parallel environment
             next_obs_dict, rewards_dict, terminations, truncations, next_infos_dict = env.step(actions)

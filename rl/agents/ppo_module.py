@@ -13,49 +13,46 @@ def layer_init(layer: nn.Linear, std: float = np.sqrt(2), bias_const: float = 0.
     return layer
 
 
-class DiscreteActorCritic(nn.Module):
-    """
-    Decoupled Actor-Critic network with strict action masking support.
-    """
-
+class DiscreteActor(nn.Module):
+    """Decentralized, execution-time. Local-obs-only."""
     def __init__(self, obs_dim: int, action_dim: int):
         super().__init__()
-        # Share standard trunk representation to reduce parameter footprint
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0)
-        )
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(obs_dim, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, action_dim), std=0.01)  # Low std ensures initial uniform exploration
+            layer_init(nn.Linear(obs_dim, 64)), nn.Tanh(),
+            layer_init(nn.Linear(64, 64)), nn.Tanh(),
+            layer_init(nn.Linear(64, action_dim), std=0.01)
         )
 
-    def get_value(self, x: torch.Tensor) -> torch.Tensor:
-        return self.critic(x)
-
-    def get_action_and_value(self, x: torch.Tensor, action: torch.Tensor = None, action_mask: torch.Tensor = None) -> \
-    Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def get_action(self, x, action=None, action_mask=None):
         logits = self.actor(x)
-
-        # STRICT FIX: Move action_mask to the same device as logits
         if action_mask is not None:
-            # Ensure the mask is on the same device as the logits
             action_mask = action_mask.to(logits.device)
-
-            # Now both tensors are guaranteed to be on the same device (e.g., cuda:0)
             logits = torch.where(action_mask.bool(), logits, torch.tensor(-1e9, device=logits.device))
-
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy()
 
-        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+
+class CentralizedCritic(nn.Module):
+    """Training-time only. Deep-Sets pooling → permutation- and n_agents-invariant V(s)."""
+    def __init__(self, vbs_local_dim: int, fbs_local_dim: int, global_extra_dim: int, hidden: int = 128):
+        super().__init__()
+        self.vbs_encoder = nn.Sequential(layer_init(nn.Linear(vbs_local_dim, hidden)), nn.Tanh())
+        self.fbs_encoder = nn.Sequential(layer_init(nn.Linear(fbs_local_dim, hidden)), nn.Tanh())
+        self.head = nn.Sequential(
+            layer_init(nn.Linear(hidden * 4 + global_extra_dim, 128)), nn.Tanh(),
+            layer_init(nn.Linear(128, 64)), nn.Tanh(),
+            layer_init(nn.Linear(64, 1), std=1.0)
+        )
+
+    def forward(self, vbs_feats, fbs_feats, global_extra):
+        # vbs_feats: (B, n_vbs, vbs_local_dim)   fbs_feats: (B, n_fbs, fbs_local_dim)
+        v = self.vbs_encoder(vbs_feats)
+        v_pool = torch.cat([v.mean(dim=1), v.max(dim=1).values], dim=-1)
+        f = self.fbs_encoder(fbs_feats)
+        f_pool = torch.cat([f.mean(dim=1), f.max(dim=1).values], dim=-1)
+        return self.head(torch.cat([v_pool, f_pool, global_extra], dim=-1))
 
 class HeterogeneousPPOManager:
     """
@@ -63,39 +60,28 @@ class HeterogeneousPPOManager:
     to completely avoid weight pollution.
     """
 
-    def __init__(
-        self,
-        vbs_obs_dim: int,
-        fbs_obs_dim: int,
-        vbs_action_dim: int,    # FIXED: was hardcoded as literal 3 inside the class body
-        fbs_action_dim: int,    # FIXED: was hardcoded as literal 17 inside the class body
-        lr: float = 3e-4,
-        device: str = "cpu"
-    ):
+    def __init__(self, vbs_obs_dim, fbs_obs_dim, vbs_action_dim, fbs_action_dim,
+                 global_extra_dim: int, lr: float = 3e-4, device: str = "cpu"):
         self.device = torch.device(device)
+        self.vbs_actor = DiscreteActor(vbs_obs_dim, vbs_action_dim).to(self.device)
+        self.fbs_actor = DiscreteActor(fbs_obs_dim, fbs_action_dim).to(self.device)
+        self.critic = CentralizedCritic(vbs_obs_dim, fbs_obs_dim, global_extra_dim).to(self.device)
+        self.actor_optimizer = optim.Adam(
+            list(self.vbs_actor.parameters()) + list(self.fbs_actor.parameters()), lr=lr, eps=1e-5)
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr, eps=1e-5)
 
-        # Action dims are now injected at construction time from the live env
-        # (see main.py fix: vbs_action_dim = env.action_space(vbs_agent_id).n).
-        # Any graph topology change or FBS action space redesign propagates automatically.
-        self.vbs_net = DiscreteActorCritic(vbs_obs_dim, vbs_action_dim).to(self.device)
-        self.fbs_net = DiscreteActorCritic(fbs_obs_dim, fbs_action_dim).to(self.device)
-
-        self.vbs_optimizer = optim.Adam(self.vbs_net.parameters(), lr=lr, eps=1e-5)
-        self.fbs_optimizer = optim.Adam(self.fbs_net.parameters(), lr=lr, eps=1e-5)
-
-
-    def get_action(self, obs: torch.Tensor, agent_type: str, action_mask: torch.Tensor = None) -> Tuple[
-        int, float, float]:
-        """Inference execution. Invoked during the environment rollout loop."""
-        self.vbs_net.eval()
-        self.fbs_net.eval()
-
-        net = self.vbs_net if agent_type == "vbs" else self.fbs_net
-
+    def get_action(self, obs, agent_type, action_mask=None):
+        net = self.vbs_actor if agent_type == "vbs" else self.fbs_actor
+        net.eval()
         with torch.no_grad():
-            action, log_prob, _, value = net.get_action_and_value(obs.to(self.device), action_mask=action_mask)
+            action, log_prob, _ = net.get_action(obs.to(self.device), action_mask=action_mask)
+        return action.cpu().item(), log_prob.cpu().item()
 
-        return action.cpu().item(), log_prob.cpu().item(), value.cpu().item()
+    def get_value(self, vbs_feats, fbs_feats, global_extra):
+        self.critic.eval()
+        with torch.no_grad():
+            return self.critic(vbs_feats.to(self.device), fbs_feats.to(self.device),
+                               global_extra.to(self.device)).cpu().item()
 
     def update_policy(self, batch_data: Dict[str, List], agent_type: str, clip_coef: float = 0.2,
                       ent_coef: float = 0.01, vf_coef: float = 0.5, ppo_epochs: int = 4, batch_size: int = 64):
@@ -232,3 +218,4 @@ class HeterogeneousPPOManager:
             action = logits.argmax(dim=-1)
 
         return action.cpu().item()
+

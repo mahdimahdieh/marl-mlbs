@@ -370,6 +370,7 @@ class CoverageParallelEnv(ParallelEnv):
 
             infos[agent_id] = {"action_mask": mask}
 
+        self._last_obs = obs
         return obs, infos
 
     def _get_raw_id(self, agent_string: str) -> int:
@@ -381,3 +382,12 @@ class CoverageParallelEnv(ParallelEnv):
         obj = (self.agent_manager.vbs_registry[agent_id]
                if is_vbs else self.agent_manager.fbs_registry[agent_id])
         return obj, is_vbs
+
+    def get_global_state(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Training-time-only joint state for the centralized critic. Never expose to actors."""
+        vbs_feats = np.stack([self._last_obs[a] for a in self.agents if "vbs" in a]) \
+            if any("vbs" in a for a in self.agents) else np.zeros((1, 15), dtype=np.float32)
+        fbs_feats = np.stack([self._last_obs[a] for a in self.agents if "fbs" in a]) \
+            if any("fbs" in a for a in self.agents) else np.zeros((1, 11), dtype=np.float32)
+        global_extra = np.concatenate([[self.last_true_coverage], self.last_uncovered_grid.flatten()])  # item 7
+        return vbs_feats, fbs_feats, global_extra
