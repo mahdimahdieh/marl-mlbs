@@ -7,6 +7,7 @@ from gymnasium import spaces
 from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseStation
 from infrastructure.graph.networkx_engine import NetworkXRoadEngine
 from infrastructure.simulation.pywisim_adapter import PyWiSimAdapter
+from rl.envs.reward_normalizer import RunningNorm
 
 
 class CoverageParallelEnv(ParallelEnv):
@@ -40,6 +41,9 @@ class CoverageParallelEnv(ParallelEnv):
         # used to build the third observation dimension without re-running spatial math.
         self.last_true_coverage: float = 0.0
         self.last_coverage_matrix: np.ndarray = None
+
+        self.marginal_norm = RunningNorm()
+        self.team_norm = RunningNorm()
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
@@ -191,10 +195,13 @@ class CoverageParallelEnv(ParallelEnv):
             # while overlap_penalty actively pushes redundant agents negative —
             # providing a gradient even when two agents cover exactly the same users
             # (where marginal_contribution AND team_coverage might still be positive).
+            self.marginal_norm.update(marginal_contribution)
+            self.team_norm.update(true_coverage_efficiency)
+
             rewards[agent_id] = REWARD_SCALE * (
-                MARGINAL_WEIGHT * marginal_contribution
-                + TEAM_WEIGHT * true_coverage_efficiency
-                - OVERLAP_PENALTY_WEIGHT * overlap_ratio
+                    MARGINAL_WEIGHT * self.marginal_norm.normalize(marginal_contribution)
+                    + TEAM_WEIGHT * self.team_norm.normalize(true_coverage_efficiency)
+                    - OVERLAP_PENALTY_WEIGHT * overlap_ratio
             )
 
 
