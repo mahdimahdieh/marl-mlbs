@@ -54,7 +54,7 @@ class FlyingBaseStation(BaseStation):
 class VehicleBaseStation(BaseStation):
     current_branch_id: int = 0
     current_slot_index: int = 0
-
+    home_branch_id: int = 0 # structural prior, topology-bound not roster-bound
     # Link to tethered VBS
     tethered_fbs_ids: List[int] = field(default_factory=list)
 
@@ -128,3 +128,8 @@ class AgentManager:
         )
 
         return total_effective_coverage / total_capacity
+
+    def assign_home_branches(self, num_branches: int) -> None:
+        """Call once after all VBS registration, before env.reset()."""
+        for idx, vbs in enumerate(sorted(self.vbs_registry.values(), key=lambda v: v.id)):
+            vbs.home_branch_id = (idx % num_branches) + 1  # branches are 1-indexed node ids

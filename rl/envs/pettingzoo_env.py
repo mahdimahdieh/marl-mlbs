@@ -44,15 +44,11 @@ class CoverageParallelEnv(ParallelEnv):
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
         if "vbs" in agent:
-            # [norm_x, norm_y, coverage_frac, norm_slot_idx,
-            #  branch_0_hot, branch_1_hot, branch_2_hot]
-            # norm_slot_idx: 0.0=at center, 1.0=at edge terminus
-            # branch_hot:    one-hot for active branch; all-zeros when at center (slot==0)
-            return spaces.Box(low=0.0, high=1.0, shape=(7,), dtype=np.float32)
+            # [norm_x, norm_y, coverage_frac, norm_slot, branch_hot(3),
+            #  home_branch_hot(3), branch_occupancy(3), uncovered_centroid_dx_dy(2)]  # last block from item 7
+            return spaces.Box(low=0.0, high=1.0, shape=(15,), dtype=np.float32)
         else:
-            # [norm_x, norm_y, coverage_frac, norm_offset_zone]
-            # norm_offset_zone: current polar zone / 16 → tells FBS which half-/full-dist ring it's in
-            return spaces.Box(low=0.0, high=1.0, shape=(4,), dtype=np.float32)
+            return spaces.Box(low=0.0, high=1.0, shape=(11,), dtype=np.float32)  # extended in items 6+7
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Discrete:
@@ -266,7 +262,42 @@ class CoverageParallelEnv(ParallelEnv):
         obs = {}
         infos = {}
         total_users = self.sim_adapter.num_users
-        MAX_ZONE = 16.0  # FBS zones 0–16
+        MAX_ZONE = 16.0
+        NUM_BRANCHES = 3
+
+        # --- Shared relational features, computed ONCE per step (not per-agent) ---
+        branch_occupancy = np.zeros(NUM_BRANCHES, dtype=np.float32)
+        n_vbs = sum(1 for a in self.agents if "vbs" in a)
+        if n_vbs > 0:
+            for a in self.agents:
+                obj, is_vbs = self._get_agent_obj(a)
+                if is_vbs and obj.current_slot_index > 0 and 1 <= obj.current_branch_id <= NUM_BRANCHES:
+                    branch_occupancy[obj.current_branch_id - 1] += 1.0
+            branch_occupancy /= n_vbs
+
+        # Uncovered-user centroid — item 7's relational gradient cue.
+        # Guard both the cold-start case (no coverage history yet) and the
+        # fully-covered case (empty uncovered set) with the same map-center fallback.
+        if self.last_coverage_matrix is not None:
+            any_covered_mask = np.any(self.last_coverage_matrix, axis=0)
+            uncovered_coords = self.sim_adapter.user_coords[~any_covered_mask]
+        else:
+            uncovered_coords = np.empty((0, 2), dtype=np.float32)
+
+        if len(uncovered_coords) > 0:
+            uncovered_centroid = uncovered_coords.mean(axis=0)
+        else:
+            uncovered_centroid = np.array(self.map_dim, dtype=np.float32) / 2.0
+
+        # --- VBS EMA update pass, decoupled from iteration order for robustness ---
+        # Explicit pre-pass rather than relying on "VBS happen to precede FBS in
+        # self.agents" — that ordering holds today (possible_agents concatenates
+        # VBS then FBS) but shouldn't be a silent dependency of correctness.
+        for a in self.agents:
+            obj, is_vbs = self._get_agent_obj(a)
+            if is_vbs:
+                vx, vy = self._calculate_world_coords(obj, True)
+                obj.update_ema(vx, vy)
 
         for i, agent_id in enumerate(self.agents):
             agent_obj, is_vbs = self._get_agent_obj(agent_id)
@@ -275,7 +306,6 @@ class CoverageParallelEnv(ParallelEnv):
             norm_x = np.clip(x / self.map_dim[0], 0.0, 1.0)
             norm_y = np.clip(y / self.map_dim[1], 0.0, 1.0)
 
-            # Coverage fraction — unchanged from original
             if (self.last_coverage_matrix is not None
                     and i < len(self.last_coverage_matrix)):
                 raw_coverage_frac = np.clip(
@@ -285,37 +315,51 @@ class CoverageParallelEnv(ParallelEnv):
             else:
                 raw_coverage_frac = 0.0
 
+            # Relational gradient cue — identical derivation for both agent types
+            dx = np.clip((uncovered_centroid[0] - x) / self.map_dim[0], -1.0, 1.0)
+            dy = np.clip((uncovered_centroid[1] - y) / self.map_dim[1], -1.0, 1.0)
+
             if is_vbs:
-                # How far along the chosen branch (0.0 = center, 1.0 = terminus)?
                 norm_slot = agent_obj.current_slot_index / self.max_slot_per_branch
 
-                # One-hot encode the active branch.
-                # CRITICAL: only encode branch when ACTUALLY on an edge (slot > 0).
-                # At slot 0 (center) branch_id may be stale from previous backtrack;
-                # all-zeros correctly signals "at center, no active commitment."
-                branch_hot = np.zeros(3, dtype=np.float32)
-                if agent_obj.current_slot_index > 0 and 1 <= agent_obj.current_branch_id <= 3:
+                branch_hot = np.zeros(NUM_BRANCHES, dtype=np.float32)
+                if agent_obj.current_slot_index > 0 and 1 <= agent_obj.current_branch_id <= NUM_BRANCHES:
                     branch_hot[agent_obj.current_branch_id - 1] = 1.0
 
-                obs[agent_id] = np.array(
-                    [norm_x, norm_y, raw_coverage_frac,
-                     norm_slot,
-                     branch_hot[0], branch_hot[1], branch_hot[2]],
-                    dtype=np.float32
-                )
-            else:
-                # FBS: encode current polar zone so network knows its half/full-dist ring
-                norm_zone = agent_obj.current_offset_zone / MAX_ZONE
-                obs[agent_id] = np.array(
-                    [norm_x, norm_y, raw_coverage_frac, norm_zone],
-                    dtype=np.float32
-                )
+                home_hot = np.zeros(NUM_BRANCHES, dtype=np.float32)
+                if 1 <= agent_obj.home_branch_id <= NUM_BRANCHES:
+                    home_hot[agent_obj.home_branch_id - 1] = 1.0
 
-            # Action mask — prevent invalid forward move at terminus only.
-            # Backtracking remains legal at all slots (agent can choose to reroute).
+                obs[agent_id] = np.array(
+                    [norm_x, norm_y, raw_coverage_frac, norm_slot,
+                     branch_hot[0], branch_hot[1], branch_hot[2],
+                     home_hot[0], home_hot[1], home_hot[2],
+                     branch_occupancy[0], branch_occupancy[1], branch_occupancy[2],
+                     dx, dy],
+                    dtype=np.float32
+                )  # 15 dims — matches observation_space(vbs)
+
+            else:
+                norm_zone = agent_obj.current_offset_zone / MAX_ZONE
+
+                host_vbs = self.agent_manager.vbs_registry[agent_obj.host_vbs_id]
+                host_branch_hot = np.zeros(NUM_BRANCHES, dtype=np.float32)
+                if host_vbs.current_slot_index > 0 and 1 <= host_vbs.current_branch_id <= NUM_BRANCHES:
+                    host_branch_hot[host_vbs.current_branch_id - 1] = 1.0
+
+                ema_x_norm = np.clip((host_vbs.ema_x if host_vbs.ema_x is not None else x) / self.map_dim[0], 0.0, 1.0)
+                ema_y_norm = np.clip((host_vbs.ema_y if host_vbs.ema_y is not None else y) / self.map_dim[1], 0.0, 1.0)
+
+                obs[agent_id] = np.array(
+                    [norm_x, norm_y, raw_coverage_frac, norm_zone,
+                     host_branch_hot[0], host_branch_hot[1], host_branch_hot[2],
+                     ema_x_norm, ema_y_norm, dx, dy],
+                    dtype=np.float32
+                )  # 11 dims — matches observation_space(fbs)
+
             mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
             if is_vbs and agent_obj.current_slot_index >= 10:
-                mask[agent_obj.current_branch_id - 1] = 0  # Block moving past terminus
+                mask[agent_obj.current_branch_id - 1] = 0
 
             infos[agent_id] = {"action_mask": mask}
 
