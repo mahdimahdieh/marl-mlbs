@@ -256,7 +256,9 @@ class CoverageParallelEnv(ParallelEnv):
                 return self.graph_engine.get_edge_coordinates(0, agent_obj.current_branch_id, traveled)
         else:
             host_vbs = self.agent_manager.vbs_registry[agent_obj.host_vbs_id]
-            hx, hy = self._calculate_world_coords(host_vbs, True)
+            hx, hy = host_vbs.ema_x, host_vbs.ema_y
+            if hx is None:
+                hx, hy = self._calculate_world_coords(host_vbs, True)  # cold start
             if agent_obj.current_offset_zone == 0:
                 return hx, hy
             dist_multiplier = 0.5 if agent_obj.current_offset_zone <= 8 else 1.0
@@ -287,6 +289,7 @@ class CoverageParallelEnv(ParallelEnv):
         # fully-covered case (empty uncovered set) with the same map-center fallback.
         if self.last_coverage_matrix is not None:
             any_covered_mask = np.any(self.last_coverage_matrix, axis=0)
+            self.last_uncovered_grid = self.sim_adapter.compute_uncovered_density_grid(any_covered_mask, grid_size=4)
             uncovered_coords = self.sim_adapter.user_coords[~any_covered_mask]
         else:
             uncovered_coords = np.empty((0, 2), dtype=np.float32)
@@ -327,6 +330,8 @@ class CoverageParallelEnv(ParallelEnv):
             dy = np.clip((uncovered_centroid[1] - y) / self.map_dim[1], -1.0, 1.0)
 
             if is_vbs:
+                agent_obj.update_ema(x, y)
+
                 norm_slot = agent_obj.current_slot_index / self.max_slot_per_branch
 
                 branch_hot = np.zeros(NUM_BRANCHES, dtype=np.float32)

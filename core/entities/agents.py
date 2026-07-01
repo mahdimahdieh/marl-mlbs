@@ -54,14 +54,24 @@ class FlyingBaseStation(BaseStation):
 class VehicleBaseStation(BaseStation):
     current_branch_id: int = 0
     current_slot_index: int = 0
-    home_branch_id: int = 0 # structural prior, topology-bound not roster-bound
-    # Link to tethered VBS
+    home_branch_id: int = 0
+    ema_x: float = None
+    ema_y: float = None
     tethered_fbs_ids: List[int] = field(default_factory=list)
+
+    def update_ema(self, x: float, y: float, decay: float = 0.9) -> None:
+        if self.ema_x is None:
+            self.ema_x, self.ema_y = x, y          # cold start: snap
+        else:
+            self.ema_x = decay * self.ema_x + (1 - decay) * x
+            self.ema_y = decay * self.ema_y + (1 - decay) * y
 
     def reset_state(self):
         super().reset_state()
         self.current_branch_id = 0
         self.current_slot_index = 0
+        self.ema_x = None
+        self.ema_y = None
 
 
 # --- The Station Tracker ---

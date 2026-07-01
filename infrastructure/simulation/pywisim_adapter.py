@@ -109,3 +109,14 @@ class PyWiSimAdapter(NetworkSimABC):
 
         # Fallback to normal calculations if PyWiSim calls are commented out
         return self.compute_batched_coverage(agent_coords, coverage_radii)
+
+    def compute_uncovered_density_grid(self, covered_mask: np.ndarray, grid_size: int = 4) -> np.ndarray:
+        """Fixed (grid_size, grid_size) shape regardless of num_users — safe static critic input dim."""
+        uncovered = self.user_coords[~covered_mask]
+        if len(uncovered) == 0:
+            return np.zeros((grid_size, grid_size), dtype=np.float32)
+        x_bins = np.clip((uncovered[:, 0] / self.map_dimensions[0] * grid_size).astype(int), 0, grid_size - 1)
+        y_bins = np.clip((uncovered[:, 1] / self.map_dimensions[1] * grid_size).astype(int), 0, grid_size - 1)
+        grid = np.zeros((grid_size, grid_size), dtype=np.float32)
+        np.add.at(grid, (x_bins, y_bins), 1.0)
+        return grid / max(len(uncovered), 1)
