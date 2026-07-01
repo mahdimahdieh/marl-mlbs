@@ -45,6 +45,12 @@ class CoverageParallelEnv(ParallelEnv):
         self.marginal_norm = RunningNorm()
         self.team_norm = RunningNorm()
 
+        self.uncovered_grid_size = 4
+        self.global_extra_dim = 1 + self.uncovered_grid_size ** 2  # [true_coverage] + flattened density grid
+        self.last_uncovered_grid = np.zeros(
+            (self.uncovered_grid_size, self.uncovered_grid_size), dtype=np.float32
+        )
+
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
         if "vbs" in agent:
@@ -289,11 +295,15 @@ class CoverageParallelEnv(ParallelEnv):
         # fully-covered case (empty uncovered set) with the same map-center fallback.
         if self.last_coverage_matrix is not None:
             any_covered_mask = np.any(self.last_coverage_matrix, axis=0)
-            self.last_uncovered_grid = self.sim_adapter.compute_uncovered_density_grid(any_covered_mask, grid_size=4)
+            self.last_uncovered_grid = self.sim_adapter.compute_uncovered_density_grid(
+                any_covered_mask, grid_size=self.uncovered_grid_size
+            )
             uncovered_coords = self.sim_adapter.user_coords[~any_covered_mask]
         else:
+            self.last_uncovered_grid = np.zeros(
+                (self.uncovered_grid_size, self.uncovered_grid_size), dtype=np.float32
+            )
             uncovered_coords = np.empty((0, 2), dtype=np.float32)
-
         if len(uncovered_coords) > 0:
             uncovered_centroid = uncovered_coords.mean(axis=0)
         else:
@@ -389,10 +399,10 @@ class CoverageParallelEnv(ParallelEnv):
         return obj, is_vbs
 
     def get_global_state(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Training-time-only joint state for the centralized critic. Never expose to actors."""
         vbs_feats = np.stack([self._last_obs[a] for a in self.agents if "vbs" in a]) \
             if any("vbs" in a for a in self.agents) else np.zeros((1, 15), dtype=np.float32)
         fbs_feats = np.stack([self._last_obs[a] for a in self.agents if "fbs" in a]) \
             if any("fbs" in a for a in self.agents) else np.zeros((1, 11), dtype=np.float32)
-        global_extra = np.concatenate([[self.last_true_coverage], self.last_uncovered_grid.flatten()])  # item 7
+        global_extra = np.concatenate([[self.last_true_coverage], self.last_uncovered_grid.flatten()])
+        assert global_extra.shape[0] == self.global_extra_dim, "global_extra drifted from declared schema"
         return vbs_feats, fbs_feats, global_extra

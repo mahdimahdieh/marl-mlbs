@@ -136,21 +136,23 @@ def main():
     vbs_agent_id = next(a for a in env.possible_agents if "vbs" in a)
     fbs_agent_id = next(a for a in env.possible_agents if "fbs" in a)
 
-    vbs_obs_dim    = env.observation_space(vbs_agent_id).shape[0]   # [norm_x, norm_y, cap_ratio]
-    fbs_obs_dim    = env.observation_space(fbs_agent_id).shape[0]   # same format
-    vbs_action_dim = env.action_space(vbs_agent_id).n               # dynamic: len(_branch_node_ids)
-    fbs_action_dim = env.action_space(fbs_agent_id).n               # dynamic: 1 + 8*2 = 17
+    vbs_obs_dim = env.observation_space(vbs_agent_id).shape[0]
+    fbs_obs_dim = env.observation_space(fbs_agent_id).shape[0]
+    vbs_action_dim = env.action_space(vbs_agent_id).n
+    fbs_action_dim = env.action_space(fbs_agent_id).n
+    global_extra_dim = env.global_extra_dim
 
     print(
         f"Network I/O | VBS: obs={vbs_obs_dim} act={vbs_action_dim}"
-        f" | FBS: obs={fbs_obs_dim} act={fbs_action_dim}"
+        f" | FBS: obs={fbs_obs_dim} act={fbs_action_dim} | Global: {global_extra_dim}"
     )
 
     ppo = HeterogeneousPPOManager(
         vbs_obs_dim=vbs_obs_dim,
         fbs_obs_dim=fbs_obs_dim,
-        vbs_action_dim=vbs_action_dim,   # NEW: required after Fix 2
-        fbs_action_dim=fbs_action_dim,   # NEW: required after Fix 2
+        vbs_action_dim=vbs_action_dim,
+        fbs_action_dim=fbs_action_dim,
+        global_extra_dim=global_extra_dim,
         lr=hp["learning_rate"],
         device=device
     )
