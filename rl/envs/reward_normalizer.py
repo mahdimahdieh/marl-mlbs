@@ -13,4 +13,4 @@ class RunningNorm:
 
     def normalize(self, x: float) -> float:
         std = np.sqrt(self.var / max(self.count, 1.0)) + 1e-6
-        return (x - self.mean) / std
+        return float((x - self.mean) / std)

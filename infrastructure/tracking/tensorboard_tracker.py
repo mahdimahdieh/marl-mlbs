@@ -128,8 +128,10 @@ class TensorBoardTracker(TrackingABC):
         Converts PyTorch tensors (CPU or CUDA), NumPy scalars, and Python
         numerics to a plain Python float safe for TensorBoard's C++ backend.
         """
-        if torch is not None and hasattr(value, "device"):
-            # Handles both cuda:0 and cpu tensors without an extra .is_cuda check
+        if torch is not None and isinstance(value, torch.Tensor):
+            # Explicit isinstance, not hasattr(value, "device") — NumPy ≥2.0 scalars
+            # also expose .device (Array API compliance), so the old duck-typing
+            # check silently misclassified numpy.float64 as a torch.Tensor.
             return float(value.detach().cpu().item())
         elif isinstance(value, (np.floating, np.integer)):
             return float(value.item())
