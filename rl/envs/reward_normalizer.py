@@ -1,3 +1,5 @@
+import numpy as np
+
 class RunningNorm:
     """Welford's online algorithm — single-pass mean/std, no stored history."""
     def __init__(self, eps: float = 1e-4):

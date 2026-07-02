@@ -39,15 +39,16 @@ def run_inference(config_path: str, graph_path: str, model_dir: str = None):
 
         # Guard clause to ensure the files actually exist there
         if os.path.exists(vbs_path) and os.path.exists(fbs_path):
-            ppo.vbs_net.load_state_dict(torch.load(vbs_path, map_location=device))
-            ppo.fbs_net.load_state_dict(torch.load(fbs_path, map_location=device))
+            if os.path.exists(vbs_path) and os.path.exists(fbs_path):
+                ppo.vbs_actor.load_state_dict(torch.load(vbs_path, map_location=device))
+                ppo.fbs_actor.load_state_dict(torch.load(fbs_path, map_location=device))
             print(f"Successfully loaded local W&B weights from: {model_dir}")
         else:
             print(f"Error: Weights not found in {model_dir}")
             print("Make sure 'model_vbs.pt' and 'model_fbs.pt' are inside that folder.")
             print("Running with UNTRAINED policy fallback.")
     else:
-        print("⚠️ Running with UNTRAINED policy for visualization testing.")
+        print("Running with UNTRAINED policy for visualization testing.")
 
     # 3. Initialize Pygame Renderer
     renderer = PygameRenderer(map_dim=env.map_dim)
@@ -69,7 +70,8 @@ def run_inference(config_path: str, graph_path: str, model_dir: str = None):
             t_obs = torch.tensor(obs_dict[agent_id], dtype=torch.float32).to(device)
             t_mask = torch.tensor(infos_dict[agent_id]["action_mask"], dtype=torch.float32).to(device)
 
-            action, _, _ = ppo.get_action(t_obs, agent_type, action_mask=t_mask)
+            action, _ = ppo.get_action(t_obs, agent_type, action_mask=t_mask)   # was: action, _, _ = ...
+
             actions[agent_id] = action.cpu().item() if hasattr(action, "item") else action
 
         obs_dict, rewards_dict, terminations, truncations, infos_dict = env.step(actions)

@@ -5,6 +5,7 @@ from typing import Dict, List, Any
 import os
 import datetime
 from collections import deque
+import numpy as np
 
 # Core & Infrastructure
 from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseStation
@@ -85,28 +86,17 @@ def compute_gae(rewards: List[float], values: List[float], next_value: float, ga
 
 
 def _save_models(ppo: "HeterogeneousPPOManager", save_dir: str, episode: int) -> None:
-    """
-    Persists both network state-dicts.
-
-    Two saves per call:
-      *_net.pt          — always-current 'latest' snapshot; inference.py default target
-      *_net_epN.pt      — tagged backup so we can roll back if reward spikes mid-training
-
-    Using state_dict() (not the full model) keeps files small and avoids
-    class-path binding issues when the codebase changes between checkpoint and load.
-    """
     os.makedirs(save_dir, exist_ok=True)
 
-    # Latest snapshot (overwritten every checkpoint)
-    torch.save(ppo.vbs_net.state_dict(), os.path.join(save_dir, "vbs_net.pt"))
-    torch.save(ppo.fbs_net.state_dict(), os.path.join(save_dir, "fbs_net.pt"))
+    torch.save(ppo.vbs_actor.state_dict(), os.path.join(save_dir, "vbs_actor.pt"))
+    torch.save(ppo.fbs_actor.state_dict(), os.path.join(save_dir, "fbs_actor.pt"))
+    torch.save(ppo.critic.state_dict(), os.path.join(save_dir, "critic.pt"))
 
-    # Tagged backup for rollback
-    torch.save(ppo.vbs_net.state_dict(), os.path.join(save_dir, f"vbs_net_ep{episode}.pt"))
-    torch.save(ppo.fbs_net.state_dict(), os.path.join(save_dir, f"fbs_net_ep{episode}.pt"))
+    torch.save(ppo.vbs_actor.state_dict(), os.path.join(save_dir, f"vbs_actor_ep{episode}.pt"))
+    torch.save(ppo.fbs_actor.state_dict(), os.path.join(save_dir, f"fbs_actor_ep{episode}.pt"))
+    torch.save(ppo.critic.state_dict(), os.path.join(save_dir, f"critic_ep{episode}.pt"))
 
-    print(f"Checkpoint saved {save_dir}/*net.pt  [ep {episode}]")
-
+    print(f"Checkpoint saved {save_dir}/*.pt  [ep {episode}]")
 
 def main():
     parser = argparse.ArgumentParser(description="Train VBS/FBS Base Stations")
@@ -181,35 +171,31 @@ def main():
         
         # Isolated Buffers to prevent weight contamination
         buffers = {
-            "vbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "values": [], "masks": []} for
+            "vbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": []} for
                     agent in env.agents if "vbs" in agent},
-            "fbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "values": [], "masks": []} for
+            "fbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": []} for
                     agent in env.agents if "fbs" in agent}
         }
-
         episode_reward = 0.0
 
         # --- ROLLOUT PHASE ---
+        joint_buffer = {"vbs_feats": [], "fbs_feats": [], "global_extra": [], "values": [], "rewards": []}
+
         while env.agents:
             actions = {}
-            # Action Selection Loop
             for agent_id in env.agents:
                 agent_type = "vbs" if "vbs" in agent_id else "fbs"
-
-                # Extract strict NumPy arrays and convert for PyTorch inference
                 t_obs = torch.tensor(obs_dict[agent_id], dtype=torch.float32)
                 t_mask = torch.tensor(infos_dict[agent_id]["action_mask"], dtype=torch.float32)
 
-                # Execute inference
-                action, logprob, value = ppo.get_action(t_obs, agent_type, action_mask=t_mask)
+                action, logprob = ppo.get_action(t_obs, agent_type, action_mask=t_mask)  # 2-tuple, not 3
                 actions[agent_id] = action
 
-                # Store State Transition
                 buffers[agent_type][agent_id]["obs"].append(t_obs)
                 buffers[agent_type][agent_id]["masks"].append(t_mask)
                 buffers[agent_type][agent_id]["actions"].append(action)
                 buffers[agent_type][agent_id]["logprobs"].append(logprob)
-                buffers[agent_type][agent_id]["values"].append(value)
+                # no per-agent "values" append here — the shared centralized value below owns this
 
             vbs_feats, fbs_feats, global_extra = env.get_global_state()
             step_value = ppo.get_value(
@@ -217,19 +203,21 @@ def main():
                 torch.tensor(fbs_feats, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(global_extra, dtype=torch.float32).unsqueeze(0),
             )
-            for agent_id in actions.keys():
-                agent_type = "vbs" if "vbs" in agent_id else "fbs"
-                buffers[agent_type][agent_id]["values"].append(step_value)
+            joint_buffer["vbs_feats"].append(vbs_feats)
+            joint_buffer["fbs_feats"].append(fbs_feats)
+            joint_buffer["global_extra"].append(global_extra)
+            joint_buffer["values"].append(step_value)
 
-            # Step the parallel environment
             next_obs_dict, rewards_dict, terminations, truncations, next_infos_dict = env.step(actions)
 
-            # FIX: Loop over actions.keys() instead of env.agents to guarantee
-            # rewards are captured for agents that terminated/truncated during this step.
             for agent_id in actions.keys():
                 agent_type = "vbs" if "vbs" in agent_id else "fbs"
                 buffers[agent_type][agent_id]["rewards"].append(rewards_dict[agent_id])
                 episode_reward += rewards_dict[agent_id]
+
+            # Team-level reward: mean, not sum, so its scale matches the per-agent reward
+            # scale the critic will be regressed against — sum would blow up with n_agents
+            joint_buffer["rewards"].append(float(np.mean(list(rewards_dict.values()))))
 
             obs_dict = next_obs_dict
             infos_dict = next_infos_dict
@@ -248,42 +236,45 @@ def main():
         # each station's contribution at its own capacity, so it can read 100%
         # while only a small fraction of the actual user population is covered.
         # That is what was producing the 20%-covered-but-100%-reported symptom.
-        final_efficiency = env.last_true_coverage  # was: env_config["agent_manager"].get_total_efficiency()
+        final_efficiency = env.last_true_coverage
 
-        batch_vbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "returns": [], "values": [],
-                     "masks": []}
-        batch_fbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "returns": [], "values": [],
-                     "masks": []}
+        batch_vbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
+        batch_fbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
 
-        # Calculate GAE for every agent independently
+        # Shared centralized value estimate — same baseline list used for every agent's GAE,
+        # since there is exactly one V(joint_state) per step, not one per agent.
+        shared_values = joint_buffer["values"]
+
         for agent_type in ["vbs", "fbs"]:
             target_batch = batch_vbs if agent_type == "vbs" else batch_fbs
             for agent_id, data in buffers[agent_type].items():
                 if len(data["rewards"]) == 0:
                     continue
-
-                # Terminal value is 0.0 because the episode strictly ends on max_cycles or target hit
-                advs, rets = compute_gae(data["rewards"], data["values"], next_value=0.0)
+                advs, _ = compute_gae(data["rewards"], shared_values, next_value=0.0)
 
                 target_batch["obs"].extend(data["obs"])
                 target_batch["masks"].extend(data["masks"])
                 target_batch["actions"].extend(data["actions"])
                 target_batch["logprobs"].extend(data["logprobs"])
-                target_batch["values"].extend(data["values"])
                 target_batch["advantages"].extend(advs)
-                target_batch["returns"].extend(rets)
 
-        # Execute isolated weight updates
         if len(batch_vbs["obs"]) > 0:
-            ppo.update_policy(batch_vbs, "vbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
-                              vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
-
+            ppo.update_actor(batch_vbs, "vbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
+                             ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
         if len(batch_fbs["obs"]) > 0:
-            ppo.update_policy(batch_fbs, "fbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
-                              vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
+            ppo.update_actor(batch_fbs, "fbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
+                             ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
-        reward_window.append(episode_reward)
-        coverage_window.append(final_efficiency)
+        # Critic: one team-level GAE pass over the joint-state sequence, decoupled from
+        # the per-agent actor batches above.
+        _, joint_returns = compute_gae(joint_buffer["rewards"], joint_buffer["values"], next_value=0.0)
+        ppo.update_critic({
+            "vbs_feats": joint_buffer["vbs_feats"],
+            "fbs_feats": joint_buffer["fbs_feats"],
+            "global_extra": joint_buffer["global_extra"],
+            "values": joint_buffer["values"],
+            "returns": joint_returns,
+        }, vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
         # --- LOGGING PHASE ---
         if episode % 10 == 0:
