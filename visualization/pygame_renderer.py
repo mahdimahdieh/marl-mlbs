@@ -35,7 +35,7 @@ class PygameRenderer:
         """Translates environment coordinates to screen pixels (Y is inverted in Pygame)."""
         return int(x * self.scale), int(self.window_size - (y * self.scale))
 
-    def _draw_dashed_circle(self, surface, color, center, radius, width=2, dash_length=10):
+    def _draw_dashed_circle(self, surface, color, center, radius, width=1, dash_length=10):
         """Helper to draw dashed coverage boundaries."""
         circumference = 2 * np.pi * radius
         dashes = int(circumference / dash_length)
@@ -125,7 +125,7 @@ class PygameRenderer:
             self.screen.blit(text_surf, (px + 10, py - 20))
 
         # 6. Title
-        title = self.font.render(f"5G Real-Time Inference - Step {step}", True, (0, 0, 0))
+        title = self.font.render(f"Real-Time Inference GUI - Step {step}", True, (0, 0, 0))
         self.screen.blit(title, (20, 20))
 
         pygame.display.flip()
