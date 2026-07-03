@@ -58,6 +58,7 @@ def bootstrap_environment(config_path: str, graph_path: str):
         "graph_engine": graph_engine,
         "sim_adapter": sim_adapter,
         "max_cycles": config["env_settings"]["max_cycles"],
+        "termination_goal": config["env_settings"]["termination_goal"],
         # FIXED: Forward graph topology settings from config to the env.
         # Without this, CoverageParallelEnv ignores simulation_config.json entirely
         # for these parameters and falls back to hardcoded defaults on every run.

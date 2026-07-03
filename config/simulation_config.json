@@ -1,7 +1,8 @@
 {
     "env_settings": {
         "max_cycles": 100,
-        "num_users": 1000
+        "num_users": 1000,
+        "termination_goal": 0.99
     },
     "graph_settings": {
         "center_node_id": 0,

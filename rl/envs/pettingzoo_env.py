@@ -23,6 +23,7 @@ class CoverageParallelEnv(ParallelEnv):
         self.graph_engine: NetworkXRoadEngine = config["graph_engine"]
         self.sim_adapter: PyWiSimAdapter = config["sim_adapter"]
 
+        self.termination_goal = config.get("termination_goal", 0.95)
         self.max_cycles = config.get("max_cycles", 100)
         self.map_dim = self.graph_engine.get_map_dimension()
         self.max_slot_per_branch = float(config.get("max_slot_per_branch", 10))
@@ -218,10 +219,10 @@ class CoverageParallelEnv(ParallelEnv):
         self.step_count += 1
         env_truncation = self.step_count >= self.max_cycles
 
-        # FIX: terminate when 95% of USERS are uniquely covered, not when stations
+        # FIX: terminate when 99% of USERS are uniquely covered, not when stations
         # are full. With FBS radius=45 at step 1, true_coverage ≈ 0.63 — the
         # episode will now run for max_cycles steps until PPO optimises agent spread.
-        env_termination = true_coverage_efficiency >= 0.95
+        env_termination = true_coverage_efficiency >= self.termination_goal
 
         terminations = {agent: env_termination for agent in self.agents}
         truncations = {agent: env_truncation for agent in self.agents}
