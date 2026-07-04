@@ -13,7 +13,7 @@ class NetworkXRoadEngine:
             data = json.load(f)
 
         # Instantly reconstructs the topology, nodes, edges, and all attributes
-        self.graph = nx.node_link_graph(data)
+        self.graph = nx.node_link_graph(data, edges="links")
 
     def save_to_json(self, filepath: str):
         """Exports the network using NetworkX's native node-link format."""
