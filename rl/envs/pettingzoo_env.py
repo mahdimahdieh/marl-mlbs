@@ -370,39 +370,43 @@ class CoverageParallelEnv(ParallelEnv):
 
 
             else:
-                # Polar decomposition of the FBS's own action, in the same geometry
-                # the action space already uses — no implicit cartesian re-derivation.
+                # Polar decomposition of the FBS's own action, expressed in the same
+                # geometry the action space already uses — no implicit cartesian→polar
+                # re-derivation left for the network to learn.
                 if agent_obj.current_offset_zone == 0:
                     r_frac, cos_t, sin_t = 0.0, 1.0, 0.0
-
                 else:
                     dist_multiplier = 0.5 if agent_obj.current_offset_zone <= 8 else 1.0
                     angle_idx = (agent_obj.current_offset_zone - 1) % 8
                     angle = angle_idx * (np.pi / 4)
                     r_frac = dist_multiplier
                     cos_t, sin_t = float(np.cos(angle)), float(np.sin(angle))
+
                 host_vbs = self.agent_manager.vbs_registry[agent_obj.host_vbs_id]
                 host_branch_hot = np.zeros(NUM_BRANCHES, dtype=np.float32)
                 if host_vbs.current_slot_index > 0 and 1 <= host_vbs.current_branch_id <= NUM_BRANCHES:
                     host_branch_hot[host_vbs.current_branch_id - 1] = 1.0
+
                 ema_x_norm = np.clip((host_vbs.ema_x if host_vbs.ema_x is not None else x) / self.map_dim[0], 0.0, 1.0)
                 ema_y_norm = np.clip((host_vbs.ema_y if host_vbs.ema_y is not None else y) / self.map_dim[1], 0.0, 1.0)
 
-                # Un-smoothed, this-instant host position — closes the EMA lag.
+                # NEW: un-smoothed, this-instant host position — closes the ~10-step EMA lag
+                # the FBS previously had to perceive its own anchor through.
                 host_true_x, host_true_y = self._calculate_world_coords(host_vbs, True)
                 host_true_x_norm = np.clip(host_true_x / self.map_dim[0], 0.0, 1.0)
                 host_true_y_norm = np.clip(host_true_y / self.map_dim[1], 0.0, 1.0)
+
                 identity_hot = np.zeros(self.n_fbs, dtype=np.float32)
                 identity_hot[agent_obj.identity_index] = 1.0
+
                 obs[agent_id] = np.concatenate([
-                    np.array(
-                        [norm_x, norm_y, raw_coverage_frac,
+                    np.array([norm_x, norm_y, raw_coverage_frac,
                               r_frac, cos_t, sin_t,
                               host_branch_hot[0], host_branch_hot[1], host_branch_hot[2],
                               ema_x_norm, ema_y_norm,
                               host_true_x_norm, host_true_y_norm,
                               dx, dy], dtype=np.float32),
-                              identity_hot
+                    identity_hot
                 ])
 
             mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
