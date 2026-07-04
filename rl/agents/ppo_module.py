@@ -36,23 +36,27 @@ class DiscreteActor(nn.Module):
 
 class CentralizedCritic(nn.Module):
     """Training-time only. Deep-Sets pooling → permutation- and n_agents-invariant V(s)."""
-    def __init__(self, vbs_local_dim: int, fbs_local_dim: int, global_extra_dim: int, hidden: int = 128):
+    def __init__(self, vbs_local_dim, fbs_local_dim, global_extra_dim, hidden=128):
         super().__init__()
         self.vbs_encoder = nn.Sequential(layer_init(nn.Linear(vbs_local_dim, hidden)), nn.Tanh())
         self.fbs_encoder = nn.Sequential(layer_init(nn.Linear(fbs_local_dim, hidden)), nn.Tanh())
-        self.head = nn.Sequential(
+        self.trunk = nn.Sequential(
             layer_init(nn.Linear(hidden * 4 + global_extra_dim, 128)), nn.Tanh(),
             layer_init(nn.Linear(128, 64)), nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0)
         )
+        # One head per reward-generating distribution, so each baseline
+        # matches the stream it's subtracted from.
+        self.team_head = layer_init(nn.Linear(64, 1), std=1.0)
+        self.vbs_head = layer_init(nn.Linear(64, 1), std=1.0)
+        self.fbs_head = layer_init(nn.Linear(64, 1), std=1.0)
 
     def forward(self, vbs_feats, fbs_feats, global_extra):
-        # vbs_feats: (B, n_vbs, vbs_local_dim)   fbs_feats: (B, n_fbs, fbs_local_dim)
         v = self.vbs_encoder(vbs_feats)
         v_pool = torch.cat([v.mean(dim=1), v.max(dim=1).values], dim=-1)
         f = self.fbs_encoder(fbs_feats)
         f_pool = torch.cat([f.mean(dim=1), f.max(dim=1).values], dim=-1)
-        return self.head(torch.cat([v_pool, f_pool, global_extra], dim=-1))
+        h = self.trunk(torch.cat([v_pool, f_pool, global_extra], dim=-1))
+        return {"team": self.team_head(h), "vbs": self.vbs_head(h), "fbs": self.fbs_head(h)}
 
 class HeterogeneousPPOManager:
     """
@@ -80,8 +84,8 @@ class HeterogeneousPPOManager:
     def get_value(self, vbs_feats, fbs_feats, global_extra):
         self.critic.eval()
         with torch.no_grad():
-            return self.critic(vbs_feats.to(self.device), fbs_feats.to(self.device),
-                               global_extra.to(self.device)).cpu().item()
+            out = self.critic(vbs_feats.to(self.device), fbs_feats.to(self.device), global_extra.to(self.device))
+            return {k: v.cpu().item() for k, v in out.items()}
 
     def update_actor(self, batch_data: Dict[str, List], agent_type: str,
                      clip_coef: float = 0.2, ent_coef: float = 0.01,
@@ -130,20 +134,24 @@ class HeterogeneousPPOManager:
                 )
                 self.actor_optimizer.step()
 
-    def update_critic(self, joint_batch: Dict[str, List], vf_coef: float = 0.5,
-                      ppo_epochs: int = 4, batch_size: int = 64, clip_coef: float = 0.2):
+    def update_critic(self, joint_batch, vf_coef=0.5, ppo_epochs=4, batch_size=64, clip_coef=0.2):
         """One training sample per ENVIRONMENT STEP, not per agent — the critic estimates
         a single V(joint_state); regressing it against several different per-agent
         returns for the same pooled input would give it contradictory gradients."""
         self.critic.train()
-
         b_vbs = torch.tensor(np.array(joint_batch["vbs_feats"]), dtype=torch.float32, device=self.device)
         b_fbs = torch.tensor(np.array(joint_batch["fbs_feats"]), dtype=torch.float32, device=self.device)
         b_extra = torch.tensor(np.array(joint_batch["global_extra"]), dtype=torch.float32, device=self.device)
-        b_returns = torch.tensor(joint_batch["returns"], dtype=torch.float32, device=self.device)
-        b_values = torch.tensor(joint_batch["values"], dtype=torch.float32, device=self.device)
 
-        dataset_size = b_returns.shape[0]
+        heads = {
+            "team": (joint_batch["team_returns"], joint_batch["team_values"]),
+            "vbs": (joint_batch["vbs_returns"], joint_batch["vbs_values"]),
+            "fbs": (joint_batch["fbs_returns"], joint_batch["fbs_values"]),
+        }
+        b_returns = {k: torch.tensor(v[0], dtype=torch.float32, device=self.device) for k, v in heads.items()}
+        b_values = {k: torch.tensor(v[1], dtype=torch.float32, device=self.device) for k, v in heads.items()}
+
+        dataset_size = b_returns["team"].shape[0]
         indices = torch.arange(dataset_size, device=self.device)
 
         for epoch in range(ppo_epochs):
@@ -151,15 +159,18 @@ class HeterogeneousPPOManager:
             indices = indices[perm]
             for start in range(0, dataset_size, batch_size):
                 mb_idx = indices[start:start + batch_size]
-                new_value = self.critic(b_vbs[mb_idx], b_fbs[mb_idx], b_extra[mb_idx]).flatten()
+                new_out = self.critic(b_vbs[mb_idx], b_fbs[mb_idx], b_extra[mb_idx])
 
-                v_loss_unclipped = (new_value - b_returns[mb_idx]) ** 2
-                v_clipped = b_values[mb_idx] + torch.clamp(new_value - b_values[mb_idx], -clip_coef, clip_coef)
-                v_loss_clipped = (v_clipped - b_returns[mb_idx]) ** 2
-                v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean() * vf_coef
+                loss = 0.0
+                for k in ("team", "vbs", "fbs"):
+                    nv = new_out[k].flatten()
+                    v_unclipped = (nv - b_returns[k][mb_idx]) ** 2
+                    v_clipped = b_values[k][mb_idx] + torch.clamp(nv - b_values[k][mb_idx], -clip_coef, clip_coef)
+                    v_clipped_loss = (v_clipped - b_returns[k][mb_idx]) ** 2
+                    loss = loss + 0.5 * torch.max(v_unclipped, v_clipped_loss).mean() * vf_coef
 
                 self.critic_optimizer.zero_grad()
-                v_loss.backward()
+                loss.backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
                 self.critic_optimizer.step()
 

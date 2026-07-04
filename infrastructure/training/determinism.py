@@ -28,3 +28,4 @@ def lock_determinism(seed: int) -> None:
     # (pure Linear/Tanh/Categorical), so you can tighten to warn_only=False
     # once you've confirmed no PyWiSim eval-mode op trips it.
     torch.use_deterministic_algorithms(True, warn_only=True)
+

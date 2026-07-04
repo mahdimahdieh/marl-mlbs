@@ -195,7 +195,17 @@ def main():
         episode_reward = 0.0
 
         # --- ROLLOUT PHASE ---
-        joint_buffer = {"vbs_feats": [], "fbs_feats": [], "global_extra": [], "values": [], "rewards": []}
+        joint_buffer = {
+            "vbs_feats": [],
+            "fbs_feats": [],
+            "global_extra": [],
+            "team_values": [],
+            "vbs_values": [],
+            "fbs_values": [],
+            "team_rewards": [],
+            "vbs_rewards": [],
+            "fbs_rewards": []
+        }
         terminations: Dict[str, bool] = {}
         truncations: Dict[str, bool] = {}
 
@@ -216,7 +226,7 @@ def main():
                 # no per-agent "values" append here — the shared centralized value below owns this
 
             vbs_feats, fbs_feats, global_extra = env.get_global_state()
-            step_value = ppo.get_value(
+            step_values = ppo.get_value(
                 torch.tensor(vbs_feats, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(fbs_feats, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(global_extra, dtype=torch.float32).unsqueeze(0),
@@ -224,7 +234,9 @@ def main():
             joint_buffer["vbs_feats"].append(vbs_feats)
             joint_buffer["fbs_feats"].append(fbs_feats)
             joint_buffer["global_extra"].append(global_extra)
-            joint_buffer["values"].append(step_value)
+            joint_buffer["team_values"].append(step_values["team"])
+            joint_buffer["vbs_values"].append(step_values["vbs"])
+            joint_buffer["fbs_values"].append(step_values["fbs"])
 
             next_obs_dict, rewards_dict, terminations, truncations, next_infos_dict = env.step(actions)
 
@@ -233,9 +245,11 @@ def main():
                 buffers[agent_type][agent_id]["rewards"].append(rewards_dict[agent_id])
                 episode_reward += rewards_dict[agent_id]
 
-            # Team-level reward: mean, not sum, so its scale matches the per-agent reward
-            # scale the critic will be regressed against — sum would blow up with n_agents
-            joint_buffer["rewards"].append(float(np.mean(list(rewards_dict.values()))))
+            joint_buffer["team_rewards"].append(float(np.mean(list(rewards_dict.values()))))
+            vbs_r = [rewards_dict[a] for a in rewards_dict if "vbs" in a]
+            fbs_r = [rewards_dict[a] for a in rewards_dict if "fbs" in a]
+            joint_buffer["vbs_rewards"].append(float(np.mean(vbs_r)) if vbs_r else 0.0)
+            joint_buffer["fbs_rewards"].append(float(np.mean(fbs_r)) if fbs_r else 0.0)
 
             obs_dict = next_obs_dict
             infos_dict = next_infos_dict
@@ -272,22 +286,22 @@ def main():
                 torch.tensor(f_extra, dtype=torch.float32).unsqueeze(0),
             )
         else:
-            bootstrap_value = 0.0
+            bootstrap_value = {"team": 0.0, "vbs": 0.0, "fbs": 0.0}
 
         batch_vbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
         batch_fbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
 
         # Shared centralized value estimate — same baseline list used for every agent's GAE,
         # since there is exactly one V(joint_state) per step, not one per agent.
-        shared_values = joint_buffer["values"]
 
         for agent_type in ["vbs", "fbs"]:
             target_batch = batch_vbs if agent_type == "vbs" else batch_fbs
+            type_values = joint_buffer[f"{agent_type}_values"]
             for agent_id, data in buffers[agent_type].items():
                 if len(data["rewards"]) == 0:
                     continue
-                advs, _ = compute_gae(data["rewards"], shared_values, next_value=bootstrap_value)
-
+                # baseline now matches the reward distribution it's subtracted from
+                advs, _ = compute_gae(data["rewards"], type_values, next_value=bootstrap_value[agent_type])
                 target_batch["obs"].extend(data["obs"])
                 target_batch["masks"].extend(data["masks"])
                 target_batch["actions"].extend(data["actions"])
@@ -303,13 +317,20 @@ def main():
 
         # Critic: one team-level GAE pass over the joint-state sequence, decoupled from
         # the per-agent actor batches above. Same corrected bootstrap_value applies here.
-        _, joint_returns = compute_gae(joint_buffer["rewards"], joint_buffer["values"], next_value=bootstrap_value)
+        _, team_returns = compute_gae(joint_buffer["team_rewards"], joint_buffer["team_values"],
+                                      next_value=bootstrap_value["team"])
+        _, vbs_returns = compute_gae(joint_buffer["vbs_rewards"], joint_buffer["vbs_values"],
+                                     next_value=bootstrap_value["vbs"])
+        _, fbs_returns = compute_gae(joint_buffer["fbs_rewards"], joint_buffer["fbs_values"],
+                                     next_value=bootstrap_value["fbs"])
+
         ppo.update_critic({
             "vbs_feats": joint_buffer["vbs_feats"],
             "fbs_feats": joint_buffer["fbs_feats"],
             "global_extra": joint_buffer["global_extra"],
-            "values": joint_buffer["values"],
-            "returns": joint_returns,
+            "team_values": joint_buffer["team_values"], "team_returns": team_returns,
+            "vbs_values": joint_buffer["vbs_values"], "vbs_returns": vbs_returns,
+            "fbs_values": joint_buffer["fbs_values"], "fbs_returns": fbs_returns,
         }, vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
         # --- LOGGING PHASE ---
@@ -340,7 +361,6 @@ def main():
             "Diagnostics/Episode_Length": env.step_count,
             "Diagnostics/Capacity_Utilization": env_config["agent_manager"].get_capacity_utilization(),
             "Diagnostics/Truncated": 1.0 if episode_truncated else 0.0,
-            "Diagnostics/Bootstrap_Value": float(bootstrap_value),
         }
         tracker.log_episode(metrics, step=episode)
 
