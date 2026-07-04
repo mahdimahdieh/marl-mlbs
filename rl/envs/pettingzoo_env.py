@@ -43,7 +43,8 @@ class CoverageParallelEnv(ParallelEnv):
         self.last_true_coverage: float = 0.0
         self.last_coverage_matrix: np.ndarray = None
 
-        self.marginal_norm = RunningNorm()
+        self.marginal_norm_vbs = RunningNorm()
+        self.marginal_norm_fbs = RunningNorm()
         self.team_norm = RunningNorm()
 
         self.uncovered_grid_size = 4
@@ -202,11 +203,11 @@ class CoverageParallelEnv(ParallelEnv):
             # while overlap_penalty actively pushes redundant agents negative —
             # providing a gradient even when two agents cover exactly the same users
             # (where marginal_contribution AND team_coverage might still be positive).
-            self.marginal_norm.update(marginal_contribution)
-            self.team_norm.update(true_coverage_efficiency)
+            norm = self.marginal_norm_vbs if "vbs" in agent_id else self.marginal_norm_fbs
+            norm.update(marginal_contribution)
 
             rewards[agent_id] = REWARD_SCALE * (
-                    MARGINAL_WEIGHT * self.marginal_norm.normalize(marginal_contribution)
+                    MARGINAL_WEIGHT * norm.normalize(marginal_contribution)
                     + TEAM_WEIGHT * self.team_norm.normalize(true_coverage_efficiency)
                     - OVERLAP_PENALTY_WEIGHT * overlap_ratio
             )

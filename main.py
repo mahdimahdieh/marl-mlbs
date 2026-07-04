@@ -36,7 +36,8 @@ def bootstrap_environment(config_path: str, graph_path: str):
             coverage_radius=v_cfg["coverage_radius"]
         )
         manager.register_vbs(vbs)
-    manager.assign_home_branches(num_branches=3) #  hardcoded,  bind to config["graph_settings"] if branch count becomes configurable
+    manager.assign_home_branches(
+        num_branches=3)  # hardcoded,  bind to config["graph_settings"] if branch count becomes configurable
 
     for f_cfg in config["fbs_agents"]:
         fbs = FlyingBaseStation(
@@ -70,7 +71,16 @@ def bootstrap_environment(config_path: str, graph_path: str):
 
 
 def compute_gae(rewards: List[float], values: List[float], next_value: float, gamma: float = 0.99, lam: float = 0.95):
-    """Calculates Generalized Advantage Estimation for stable Critic targets."""
+    """Calculates Generalized Advantage Estimation for stable Critic targets.
+
+    `next_value` MUST be 0.0 only for a true terminal (absorbing) state. For a
+    time-limit truncation the trajectory is NOT actually over, and next_value
+    should be the critic's own V(s_T) estimate -- see the bootstrap_value
+    computation in the training loop below. Bootstrapping every rollout with
+    a hardcoded 0.0 regardless of termination vs. truncation was bug ledger
+    item #5: it systematically biases the value target toward zero for every
+    episode that hits max_cycles without solving the task.
+    """
     advantages = []
     last_gae_lam = 0
 
@@ -99,13 +109,16 @@ def _save_models(ppo: "HeterogeneousPPOManager", save_dir: str, episode: int) ->
 
     print(f"Checkpoint saved {save_dir}/*.pt  [ep {episode}]")
 
+
 def main():
     parser = argparse.ArgumentParser(description="Train VBS/FBS Base Stations")
     parser.add_argument("--config", type=str, default="config/simulation_config.json")
     parser.add_argument("--graph", type=str, default="config/graph_map.json")
     parser.add_argument("--episodes", type=int, default=5000)
-    parser.add_argument("--save-dir",   type=str, default="models")
+    parser.add_argument("--save-dir", type=str, default="models")
     parser.add_argument("--save-every", type=int, default=250)
+    parser.add_argument("--log-every", type=int, default=10,
+                        help="Console print cadence. TensorBoard now logs EVERY episode (see bug ledger #3) regardless of this.")
     parser.add_argument("--seed", type=int, default=42,
                         help="seed for full reproducibility / overfitting baseline.")
     parser.add_argument("--overfit", action="store_true",
@@ -158,18 +171,19 @@ def main():
     save_dir = os.path.join(args.save_dir, data_time)
     os.mkdir(save_dir)
 
-    reward_window = deque(maxlen=100)  # last 100 episodes
+    # BUG LEDGER #3 FIX: these used to be seeded with a single 0.0 and never
+    # appended to anywhere in the loop, so every "avg100" value ever printed
+    # or logged was sum([0.0]) / 1 == 0.0 for the entire run. They now start
+    # empty and are appended to unconditionally, every episode, below.
+    reward_window = deque(maxlen=100)
     coverage_window = deque(maxlen=100)
-
-    reward_window.append(0.)
-    coverage_window.append(0.)
-
+    solve_window = deque(maxlen=100)  # 1.0 if the episode reached the true-coverage goal, else 0.0
 
     # 2. Training Loop
     for episode in range(1, args.episodes + 1):
         distribution_seed = args.seed if args.overfit else episode
         obs_dict, infos_dict = env.reset(seed=distribution_seed)
-        
+
         # Isolated Buffers to prevent weight contamination
         buffers = {
             "vbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": []} for
@@ -181,6 +195,8 @@ def main():
 
         # --- ROLLOUT PHASE ---
         joint_buffer = {"vbs_feats": [], "fbs_feats": [], "global_extra": [], "values": [], "rewards": []}
+        terminations: Dict[str, bool] = {}
+        truncations: Dict[str, bool] = {}
 
         while env.agents:
             actions = {}
@@ -239,6 +255,24 @@ def main():
         # That is what was producing the 20%-covered-but-100%-reported symptom.
         final_efficiency = env.last_true_coverage
 
+        # BUG LEDGER #5 FIX: distinguish a true terminal state from a
+        # time-limit truncation. compute_gae used to always bootstrap with
+        # next_value=0.0, which is only correct for the terminated case — a
+        # truncated episode is not actually over, so we bootstrap it with the
+        # critic's own value estimate at the final observed state instead.
+        episode_terminated = bool(terminations) and all(terminations.values())
+        episode_truncated = bool(truncations) and all(truncations.values()) and not episode_terminated
+
+        if episode_truncated:
+            f_vbs, f_fbs, f_extra = env.get_global_state()
+            bootstrap_value = ppo.get_value(
+                torch.tensor(f_vbs, dtype=torch.float32).unsqueeze(0),
+                torch.tensor(f_fbs, dtype=torch.float32).unsqueeze(0),
+                torch.tensor(f_extra, dtype=torch.float32).unsqueeze(0),
+            )
+        else:
+            bootstrap_value = 0.0
+
         batch_vbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
         batch_fbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
 
@@ -251,7 +285,7 @@ def main():
             for agent_id, data in buffers[agent_type].items():
                 if len(data["rewards"]) == 0:
                     continue
-                advs, _ = compute_gae(data["rewards"], shared_values, next_value=0.0)
+                advs, _ = compute_gae(data["rewards"], shared_values, next_value=bootstrap_value)
 
                 target_batch["obs"].extend(data["obs"])
                 target_batch["masks"].extend(data["masks"])
@@ -267,8 +301,8 @@ def main():
                              ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
         # Critic: one team-level GAE pass over the joint-state sequence, decoupled from
-        # the per-agent actor batches above.
-        _, joint_returns = compute_gae(joint_buffer["rewards"], joint_buffer["values"], next_value=0.0)
+        # the per-agent actor batches above. Same corrected bootstrap_value applies here.
+        _, joint_returns = compute_gae(joint_buffer["rewards"], joint_buffer["values"], next_value=bootstrap_value)
         ppo.update_critic({
             "vbs_feats": joint_buffer["vbs_feats"],
             "fbs_feats": joint_buffer["fbs_feats"],
@@ -278,25 +312,43 @@ def main():
         }, vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
         # --- LOGGING PHASE ---
-        if episode % 10 == 0:
-            roll_reward_mean = sum(reward_window) / len(reward_window)
-            roll_coverage_mean = sum(coverage_window) / len(coverage_window)
+        # Rolling windows are now updated EVERY episode (bug ledger #3), not
+        # just on the episodes we happen to print. TensorBoard also now
+        # receives a scalar dict every episode instead of every 10th — full
+        # resolution data for TB's own smoothing slider to work with. Console
+        # printing stays at --log-every to avoid flooding stdout.
+        reward_window.append(episode_reward)
+        coverage_window.append(final_efficiency)
+        solve_window.append(1.0 if episode_terminated else 0.0)
 
-            metrics = {
-                "Episode_Reward": episode_reward,
-                # True network coverage: unique users covered / total users
-                "True_Coverage": final_efficiency,
-                # Capacity utilization diagnostic (should be high but is NOT the objective)
-                "Capacity_Utilization": env_config["agent_manager"].get_capacity_utilization(),
-                "Episode_Length": env.step_count,
-                "Rolling100_Reward": roll_reward_mean,
-                "Rolling100_Coverage": roll_coverage_mean,
-            }
-            tracker.log_episode(metrics, step=episode)
+        roll_reward_mean = sum(reward_window) / len(reward_window)
+        roll_coverage_mean = sum(coverage_window) / len(coverage_window)
+        roll_solve_rate = sum(solve_window) / len(solve_window)
+
+        metrics = {
+            # Grouped by TensorBoard tag prefix so the UI folds them into sections.
+            "Reward/Episode": episode_reward,
+            # Raw episode_reward is a sum over a variable-length rollout, so it's
+            # not comparable across episodes of different lengths (see bug ledger
+            # #6) — Per_Step gives a length-normalized view alongside it.
+            "Reward/Per_Step": (episode_reward / env.step_count) if env.step_count else 0.0,
+            "Reward/Rolling100": roll_reward_mean,
+            "Coverage/Episode": final_efficiency,
+            "Coverage/Rolling100": roll_coverage_mean,
+            "Coverage/SolveRate_Rolling100": roll_solve_rate,
+            "Diagnostics/Episode_Length": env.step_count,
+            "Diagnostics/Capacity_Utilization": env_config["agent_manager"].get_capacity_utilization(),
+            "Diagnostics/Truncated": 1.0 if episode_truncated else 0.0,
+            "Diagnostics/Bootstrap_Value": float(bootstrap_value),
+        }
+        tracker.log_episode(metrics, step=episode)
+
+        if episode % args.log_every == 0:
             print(
                 f"Episode: {episode:4d} | "
                 f"Coverage: {final_efficiency:.2%} (avg100: {roll_coverage_mean:.2%}) | "
                 f"Reward: {episode_reward:.2f} (avg100: {roll_reward_mean:.2f}) | "
+                f"Solve100: {roll_solve_rate:.1%} | "
                 f"Length: {env.step_count}"
             )
         if episode % args.save_every == 0:
