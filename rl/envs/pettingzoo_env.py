@@ -53,14 +53,17 @@ class CoverageParallelEnv(ParallelEnv):
             (self.uncovered_grid_size, self.uncovered_grid_size), dtype=np.float32
         )
 
+        self.n_vbs = len(self.agent_manager.vbs_registry)
+        self.n_fbs = len(self.agent_manager.fbs_registry)
+
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
         if "vbs" in agent:
             # [norm_x, norm_y, coverage_frac, norm_slot, branch_hot(3),
             #  home_branch_hot(3), branch_occupancy(3), uncovered_centroid_dx_dy(2)]  # last block from item 7
-            return spaces.Box(low=0.0, high=1.0, shape=(15,), dtype=np.float32)
+            return spaces.Box(low=0.0, high=1.0, shape=(15 + self.n_vbs,), dtype=np.float32)
         else:
-            return spaces.Box(low=0.0, high=1.0, shape=(11,), dtype=np.float32)  # extended in items 6+7
+            return spaces.Box(low=0.0, high=1.0, shape=(15 + self.n_fbs,), dtype=np.float32)  # extended in items 6+7
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Discrete:
@@ -279,7 +282,6 @@ class CoverageParallelEnv(ParallelEnv):
         obs = {}
         infos = {}
         total_users = self.sim_adapter.num_users
-        MAX_ZONE = 16.0
         NUM_BRANCHES = 3
 
         # --- Shared relational features, computed ONCE per step (not per-agent) ---
@@ -354,32 +356,54 @@ class CoverageParallelEnv(ParallelEnv):
                 if 1 <= agent_obj.home_branch_id <= NUM_BRANCHES:
                     home_hot[agent_obj.home_branch_id - 1] = 1.0
 
-                obs[agent_id] = np.array(
-                    [norm_x, norm_y, raw_coverage_frac, norm_slot,
-                     branch_hot[0], branch_hot[1], branch_hot[2],
-                     home_hot[0], home_hot[1], home_hot[2],
-                     branch_occupancy[0], branch_occupancy[1], branch_occupancy[2],
-                     dx, dy],
-                    dtype=np.float32
-                )  # 15 dims — matches observation_space(vbs)
+                identity_hot = np.zeros(self.n_vbs, dtype=np.float32)
+                identity_hot[agent_obj.identity_index] = 1.0
+
+                obs[agent_id] = np.concatenate([
+                    np.array([norm_x, norm_y, raw_coverage_frac, norm_slot,
+                              branch_hot[0], branch_hot[1], branch_hot[2],
+                              home_hot[0], home_hot[1], home_hot[2],
+                              branch_occupancy[0], branch_occupancy[1], branch_occupancy[2],
+                              dx, dy], dtype=np.float32),
+                    identity_hot
+                ])  # 15 + n_vbs dims
+
 
             else:
-                norm_zone = agent_obj.current_offset_zone / MAX_ZONE
+                # Polar decomposition of the FBS's own action, in the same geometry
+                # the action space already uses — no implicit cartesian re-derivation.
+                if agent_obj.current_offset_zone == 0:
+                    r_frac, cos_t, sin_t = 0.0, 1.0, 0.0
 
+                else:
+                    dist_multiplier = 0.5 if agent_obj.current_offset_zone <= 8 else 1.0
+                    angle_idx = (agent_obj.current_offset_zone - 1) % 8
+                    angle = angle_idx * (np.pi / 4)
+                    r_frac = dist_multiplier
+                    cos_t, sin_t = float(np.cos(angle)), float(np.sin(angle))
                 host_vbs = self.agent_manager.vbs_registry[agent_obj.host_vbs_id]
                 host_branch_hot = np.zeros(NUM_BRANCHES, dtype=np.float32)
                 if host_vbs.current_slot_index > 0 and 1 <= host_vbs.current_branch_id <= NUM_BRANCHES:
                     host_branch_hot[host_vbs.current_branch_id - 1] = 1.0
-
                 ema_x_norm = np.clip((host_vbs.ema_x if host_vbs.ema_x is not None else x) / self.map_dim[0], 0.0, 1.0)
                 ema_y_norm = np.clip((host_vbs.ema_y if host_vbs.ema_y is not None else y) / self.map_dim[1], 0.0, 1.0)
 
-                obs[agent_id] = np.array(
-                    [norm_x, norm_y, raw_coverage_frac, norm_zone,
-                     host_branch_hot[0], host_branch_hot[1], host_branch_hot[2],
-                     ema_x_norm, ema_y_norm, dx, dy],
-                    dtype=np.float32
-                )  # 11 dims — matches observation_space(fbs)
+                # Un-smoothed, this-instant host position — closes the EMA lag.
+                host_true_x, host_true_y = self._calculate_world_coords(host_vbs, True)
+                host_true_x_norm = np.clip(host_true_x / self.map_dim[0], 0.0, 1.0)
+                host_true_y_norm = np.clip(host_true_y / self.map_dim[1], 0.0, 1.0)
+                identity_hot = np.zeros(self.n_fbs, dtype=np.float32)
+                identity_hot[agent_obj.identity_index] = 1.0
+                obs[agent_id] = np.concatenate([
+                    np.array(
+                        [norm_x, norm_y, raw_coverage_frac,
+                              r_frac, cos_t, sin_t,
+                              host_branch_hot[0], host_branch_hot[1], host_branch_hot[2],
+                              ema_x_norm, ema_y_norm,
+                              host_true_x_norm, host_true_y_norm,
+                              dx, dy], dtype=np.float32),
+                              identity_hot
+                ])
 
             mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
             if is_vbs and agent_obj.current_slot_index >= 10:
@@ -402,9 +426,9 @@ class CoverageParallelEnv(ParallelEnv):
 
     def get_global_state(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         vbs_feats = np.stack([self._last_obs[a] for a in self.agents if "vbs" in a]) \
-            if any("vbs" in a for a in self.agents) else np.zeros((1, 15), dtype=np.float32)
+            if any("vbs" in a for a in self.agents) else np.zeros((1, 15 + self.n_vbs), dtype=np.float32)
         fbs_feats = np.stack([self._last_obs[a] for a in self.agents if "fbs" in a]) \
-            if any("fbs" in a for a in self.agents) else np.zeros((1, 11), dtype=np.float32)
+            if any("fbs" in a for a in self.agents) else np.zeros((1, 15 + self.n_fbs), dtype=np.float32)
         global_extra = np.concatenate([[self.last_true_coverage], self.last_uncovered_grid.flatten()])
         assert global_extra.shape[0] == self.global_extra_dim, "global_extra drifted from declared schema"
         return vbs_feats, fbs_feats, global_extra

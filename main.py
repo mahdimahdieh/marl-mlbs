@@ -38,6 +38,7 @@ def bootstrap_environment(config_path: str, graph_path: str):
         manager.register_vbs(vbs)
     manager.assign_home_branches(
         num_branches=3)  # hardcoded,  bind to config["graph_settings"] if branch count becomes configurable
+    manager.assign_identity_indices()
 
     for f_cfg in config["fbs_agents"]:
         fbs = FlyingBaseStation(

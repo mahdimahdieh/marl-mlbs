@@ -16,6 +16,9 @@ class BaseStation:
     # visualisation ONLY — never pass this to reward or termination logic.
     current_coverage_count: int = 0
 
+    # injective slot, decoupled from home_branch_id's mod-3 collisions
+    identity_index: int = 0
+
     @property
     def is_at_capacity(self) -> bool:
         return self.current_coverage_count >= self.capacity
@@ -143,3 +146,13 @@ class AgentManager:
         """Call once after all VBS registration, before env.reset()."""
         for idx, vbs in enumerate(sorted(self.vbs_registry.values(), key=lambda v: v.id)):
             vbs.home_branch_id = (idx % num_branches) + 1  # branches are 1-indexed node ids
+
+    def assign_identity_indices(self) -> None:
+        """Call once after all registration, before env.reset(). Injective per-type
+        slot index — structurally independent of home_branch_id's mod-N_BRANCHES
+        arithmetic — so a shared-weight policy can never see bit-identical inputs
+        for two physically distinct agents."""
+        for idx, vbs in enumerate(sorted(self.vbs_registry.values(), key=lambda v: v.id)):
+            vbs.identity_index = idx
+        for idx, fbs in enumerate(sorted(self.fbs_registry.values(), key=lambda f: f.id)):
+            fbs.identity_index = idx
