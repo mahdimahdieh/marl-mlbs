@@ -36,6 +36,23 @@ class DiscreteActor(nn.Module):
 
 class CentralizedCritic(nn.Module):
     """Training-time only. Deep-Sets pooling → permutation- and n_agents-invariant V(s)."""
+
+    # BUG LEDGER — FIXED (baseline/reward-stream granularity mismatch, Option A):
+    # vbs_head/fbs_head used to consume ONLY the pooled, type-level trunk output `h`
+    # — i.e. exactly one value per type per step, trained against the MEAN reward
+    # across all agents of that type. That single type-mean value was then reused,
+    # unmodified, as the GAE baseline for EACH individual agent's own distinct
+    # marginal-contribution reward trajectory — a systematic bias whenever agents
+    # of the same type diverge in behavior, which the reward design explicitly
+    # encourages. Fixed by making vbs_head/fbs_head agent-conditioned: each head
+    # now consumes the concatenation of (a) that agent's own per-agent encoded
+    # features `v_i`/`f_i` (computed by vbs_encoder/fbs_encoder BEFORE pooling —
+    # this already contains the agent's identity_hot feature carried over from its
+    # local observation, satisfying the "per-agent identity embedding" requirement
+    # without a separate embedding table) and (b) the shared team-level context `h`
+    # (so the value estimate remains centralized/joint-state-conditioned, not a
+    # decentralized per-agent critic). team_head is UNCHANGED — still a single
+    # team-level value computed from the pooled `h` only.
     def __init__(self, vbs_local_dim, fbs_local_dim, global_extra_dim, hidden=128):
         super().__init__()
         self.vbs_encoder = nn.Sequential(layer_init(nn.Linear(vbs_local_dim, hidden)), nn.Tanh())
@@ -47,16 +64,28 @@ class CentralizedCritic(nn.Module):
         # One head per reward-generating distribution, so each baseline
         # matches the stream it's subtracted from.
         self.team_head = layer_init(nn.Linear(64, 1), std=1.0)
-        self.vbs_head = layer_init(nn.Linear(64, 1), std=1.0)
-        self.fbs_head = layer_init(nn.Linear(64, 1), std=1.0)
+        # Agent-conditioned heads: input is [per-agent encoded features (hidden) ;
+        # pooled team context (64)] — see class docstring BUG LEDGER above.
+        self.vbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
+        self.fbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
 
     def forward(self, vbs_feats, fbs_feats, global_extra):
-        v = self.vbs_encoder(vbs_feats)
+        v = self.vbs_encoder(vbs_feats)  # (B, n_vbs, hidden) — per-agent, pre-pooling
         v_pool = torch.cat([v.mean(dim=1), v.max(dim=1).values], dim=-1)
-        f = self.fbs_encoder(fbs_feats)
+        f = self.fbs_encoder(fbs_feats)  # (B, n_fbs, hidden) — per-agent, pre-pooling
         f_pool = torch.cat([f.mean(dim=1), f.max(dim=1).values], dim=-1)
-        h = self.trunk(torch.cat([v_pool, f_pool, global_extra], dim=-1))
-        return {"team": self.team_head(h), "vbs": self.vbs_head(h), "fbs": self.fbs_head(h)}
+        h = self.trunk(torch.cat([v_pool, f_pool, global_extra], dim=-1))  # (B, 64), team-level context
+
+        n_vbs, n_fbs = v.shape[1], f.shape[1]
+        h_for_vbs = h.unsqueeze(1).expand(-1, n_vbs, -1)  # (B, n_vbs, 64)
+        h_for_fbs = h.unsqueeze(1).expand(-1, n_fbs, -1)  # (B, n_fbs, 64)
+
+        # (B, n_vbs, 1) -> (B, n_vbs); one value per VBS agent, conditioned on its
+        # own encoded features AND the shared team context.
+        vbs_values = self.vbs_head(torch.cat([v, h_for_vbs], dim=-1)).squeeze(-1)
+        fbs_values = self.fbs_head(torch.cat([f, h_for_fbs], dim=-1)).squeeze(-1)
+
+        return {"team": self.team_head(h), "vbs": vbs_values, "fbs": fbs_values}
 
 class HeterogeneousPPOManager:
     """
@@ -82,10 +111,22 @@ class HeterogeneousPPOManager:
         return action.cpu().item(), log_prob.cpu().item()
 
     def get_value(self, vbs_feats, fbs_feats, global_extra):
+        """Returns {"team": float, "vbs": List[float], "fbs": List[float]}.
+
+        team is still a single scalar (team_head is unchanged). vbs/fbs are now
+        one value PER AGENT (see CentralizedCritic BUG LEDGER) in the same agent
+        order as the vbs_feats/fbs_feats rows passed in (i.e. the order produced
+        by env.get_global_state()) — callers must preserve that ordering when
+        matching these values back to agent_ids.
+        """
         self.critic.eval()
         with torch.no_grad():
             out = self.critic(vbs_feats.to(self.device), fbs_feats.to(self.device), global_extra.to(self.device))
-            return {k: v.cpu().item() for k, v in out.items()}
+            return {
+                "team": out["team"].cpu().item(),
+                "vbs": out["vbs"].squeeze(0).cpu().tolist(),
+                "fbs": out["fbs"].squeeze(0).cpu().tolist(),
+            }
 
     def update_actor(self, batch_data: Dict[str, List], agent_type: str,
                      clip_coef: float = 0.2, ent_coef: float = 0.01,
@@ -135,9 +176,13 @@ class HeterogeneousPPOManager:
                 self.actor_optimizer.step()
 
     def update_critic(self, joint_batch, vf_coef=0.5, ppo_epochs=4, batch_size=64, clip_coef=0.2):
-        """One training sample per ENVIRONMENT STEP, not per agent — the critic estimates
-        a single V(joint_state); regressing it against several different per-agent
-        returns for the same pooled input would give it contradictory gradients."""
+        """One training SAMPLE (row) per ENVIRONMENT STEP, matching the pooled
+        vbs_feats/fbs_feats/global_extra inputs. "team" targets are a scalar per
+        step (team_head, unchanged). "vbs"/"fbs" targets are now a vector of one
+        value PER AGENT per step (see CentralizedCritic BUG LEDGER) — each column
+        trains the corresponding per-agent output slot of vbs_head/fbs_head against
+        that specific agent's own return, rather than a single type-mean target
+        applied identically across agents."""
         self.critic.train()
         b_vbs = torch.tensor(np.array(joint_batch["vbs_feats"]), dtype=torch.float32, device=self.device)
         b_fbs = torch.tensor(np.array(joint_batch["fbs_feats"]), dtype=torch.float32, device=self.device)
@@ -163,10 +208,18 @@ class HeterogeneousPPOManager:
 
                 loss = 0.0
                 for k in ("team", "vbs", "fbs"):
-                    nv = new_out[k].flatten()
-                    v_unclipped = (nv - b_returns[k][mb_idx]) ** 2
-                    v_clipped = b_values[k][mb_idx] + torch.clamp(nv - b_values[k][mb_idx], -clip_coef, clip_coef)
-                    v_clipped_loss = (v_clipped - b_returns[k][mb_idx]) ** 2
+                    # Flatten uniformly: "team" is (batch, 1) -> (batch,); "vbs"/"fbs"
+                    # are (batch, n_agents) -> (batch * n_agents,). b_returns[k]/
+                    # b_values[k] are reshaped to match before flattening so each
+                    # element still pairs a per-agent (or per-step, for team)
+                    # prediction with its own matching target — never a shared
+                    # type-mean target broadcast across agents.
+                    nv = new_out[k].reshape(-1)
+                    target_returns = b_returns[k][mb_idx].reshape(nv.shape)
+                    target_values = b_values[k][mb_idx].reshape(nv.shape)
+                    v_unclipped = (nv - target_returns) ** 2
+                    v_clipped = target_values + torch.clamp(nv - target_values, -clip_coef, clip_coef)
+                    v_clipped_loss = (v_clipped - target_returns) ** 2
                     loss = loss + 0.5 * torch.max(v_unclipped, v_clipped_loss).mean() * vf_coef
 
                 self.critic_optimizer.zero_grad()

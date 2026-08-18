@@ -71,6 +71,27 @@ def bootstrap_environment(config_path: str, graph_path: str):
     return env_config, config["hyperparameters"], config
 
 
+def _broadcast_bootstrap(vals: List[float], n_agents: int) -> List[float]:
+    """Normalize a per-agent bootstrap-value list to exactly n_agents entries.
+
+    TODO(scope): CoverageParallelEnv.get_global_state() falls back to a single
+    zero-padded row whenever self.agents is empty -- which it always is by the
+    time the truncated-episode bootstrap call runs, since
+    CoverageParallelEnv.step() clears self.agents before returning on the
+    terminating step. That means the "bootstrap from the critic's own V(s_T)"
+    estimate (bug ledger #5) is actually V(zeros) whenever an episode ends,
+    not the real final observed state -- a pre-existing issue, unrelated to
+    the granularity mismatch this function guards against, and out of scope
+    for this task. This helper only prevents that pre-existing shape quirk
+    from crashing the newly per-agent-indexed bootstrap lookup below.
+    """
+    if len(vals) == n_agents:
+        return vals
+    if len(vals) == 0:
+        return [0.0] * n_agents
+    return [vals[0]] * n_agents
+
+
 def compute_gae(rewards: List[float], values: List[float], next_value: float, gamma: float = 0.99, lam: float = 0.95):
     """Calculates Generalized Advantage Estimation for stable Critic targets.
 
@@ -185,26 +206,48 @@ def main():
         distribution_seed = args.seed if args.overfit else episode
         obs_dict, infos_dict = env.reset(seed=distribution_seed)
 
+        # BUG LEDGER — FIXED (baseline/reward-stream granularity mismatch):
+        # vbs_values/fbs_values used to be ONE value per type per step (from
+        # CentralizedCritic's old type-pooled heads), trained against the MEAN
+        # reward across agents of that type, then reused UNMODIFIED as the GAE
+        # baseline for EACH individual agent's own distinct reward trajectory
+        # (buffers[agent_type][agent_id]["rewards"]). Since the marginal-
+        # contribution reward is explicitly designed to differentiate agents by
+        # their individual counterfactual contribution, baselining every agent's
+        # distinct reward stream with the same type-mean value systematically
+        # biased the advantage estimate whenever agents within a type diverge in
+        # behavior — the expected, desired outcome of the reward design.
+        #
+        # FIX (Option A — agent-conditioned value heads, see CentralizedCritic):
+        # vbs_head/fbs_head now output one value PER AGENT per step. Each agent's
+        # own value trajectory is captured directly into buffers[type][agent_id]
+        # ["values"], at the same per-step granularity as its own "rewards" — no
+        # separate type-level joint_buffer arrays needed for vbs/fbs anymore.
+        # agent order is captured once, up front, because CoverageParallelEnv
+        # keeps self.agents (and therefore env.get_global_state()'s stacking
+        # order) fixed for the full episode until the final terminating step.
+        vbs_agent_order = [a for a in env.agents if "vbs" in a]
+        fbs_agent_order = [a for a in env.agents if "fbs" in a]
+
         # Isolated Buffers to prevent weight contamination
         buffers = {
-            "vbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": []} for
+            "vbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": [], "values": []} for
                     agent in env.agents if "vbs" in agent},
-            "fbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": []} for
+            "fbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": [], "values": []} for
                     agent in env.agents if "fbs" in agent}
         }
         episode_reward = 0.0
 
         # --- ROLLOUT PHASE ---
+        # team_* stays scalar-per-step (team_head is unchanged); vbs/fbs returns
+        # and values are now assembled AFTER the rollout from buffers[type][*]["values"]/
+        # ["rewards"], at per-agent granularity (see BUG LEDGER above).
         joint_buffer = {
             "vbs_feats": [],
             "fbs_feats": [],
             "global_extra": [],
             "team_values": [],
-            "vbs_values": [],
-            "fbs_values": [],
             "team_rewards": [],
-            "vbs_rewards": [],
-            "fbs_rewards": []
         }
         terminations: Dict[str, bool] = {}
         truncations: Dict[str, bool] = {}
@@ -223,7 +266,6 @@ def main():
                 buffers[agent_type][agent_id]["masks"].append(t_mask)
                 buffers[agent_type][agent_id]["actions"].append(action)
                 buffers[agent_type][agent_id]["logprobs"].append(logprob)
-                # no per-agent "values" append here — the shared centralized value below owns this
 
             vbs_feats, fbs_feats, global_extra = env.get_global_state()
             step_values = ppo.get_value(
@@ -235,8 +277,14 @@ def main():
             joint_buffer["fbs_feats"].append(fbs_feats)
             joint_buffer["global_extra"].append(global_extra)
             joint_buffer["team_values"].append(step_values["team"])
-            joint_buffer["vbs_values"].append(step_values["vbs"])
-            joint_buffer["fbs_values"].append(step_values["fbs"])
+
+            # Per-agent value, at the SAME granularity as the per-agent reward
+            # each agent will receive this same step (fix core: no more type-mean
+            # value standing in for an individual agent's baseline).
+            for i, agent_id in enumerate(vbs_agent_order):
+                buffers["vbs"][agent_id]["values"].append(step_values["vbs"][i])
+            for i, agent_id in enumerate(fbs_agent_order):
+                buffers["fbs"][agent_id]["values"].append(step_values["fbs"][i])
 
             next_obs_dict, rewards_dict, terminations, truncations, next_infos_dict = env.step(actions)
 
@@ -246,10 +294,6 @@ def main():
                 episode_reward += rewards_dict[agent_id]
 
             joint_buffer["team_rewards"].append(float(np.mean(list(rewards_dict.values()))))
-            vbs_r = [rewards_dict[a] for a in rewards_dict if "vbs" in a]
-            fbs_r = [rewards_dict[a] for a in rewards_dict if "fbs" in a]
-            joint_buffer["vbs_rewards"].append(float(np.mean(vbs_r)) if vbs_r else 0.0)
-            joint_buffer["fbs_rewards"].append(float(np.mean(fbs_r)) if fbs_r else 0.0)
 
             obs_dict = next_obs_dict
             infos_dict = next_infos_dict
@@ -286,27 +330,55 @@ def main():
                 torch.tensor(f_extra, dtype=torch.float32).unsqueeze(0),
             )
         else:
-            bootstrap_value = {"team": 0.0, "vbs": 0.0, "fbs": 0.0}
+            bootstrap_value = {
+                "team": 0.0,
+                "vbs": [0.0] * len(vbs_agent_order),
+                "fbs": [0.0] * len(fbs_agent_order),
+            }
+        # See _broadcast_bootstrap's TODO(scope) docstring: normalizes whatever
+        # shape ppo.get_value()/env.get_global_state() produced back to exactly
+        # one bootstrap scalar per agent, defensively (does not fix the
+        # pre-existing get_global_state() zero-fallback quirk itself).
+        bootstrap_vbs = _broadcast_bootstrap(bootstrap_value["vbs"], len(vbs_agent_order))
+        bootstrap_fbs = _broadcast_bootstrap(bootstrap_value["fbs"], len(fbs_agent_order))
 
         batch_vbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
         batch_fbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
 
-        # Shared centralized value estimate — same baseline list used for every agent's GAE,
-        # since there is exactly one V(joint_state) per step, not one per agent.
+        # BUG LEDGER — FIXED: baseline (buffers[type][agent]["values"]) and reward
+        # stream (buffers[type][agent]["rewards"]) are now the SAME agent's own
+        # trajectory at the SAME per-step granularity — no more type-mean value
+        # standing in for an individual agent's distinct marginal-contribution
+        # reward. Also collects the per-agent (returns, values) needed for the
+        # critic update below, transposed into (T, n_agents) matrices aligned
+        # with vbs_agent_order/fbs_agent_order.
+        vbs_returns_by_agent, vbs_values_by_agent = [], []
+        for i, agent_id in enumerate(vbs_agent_order):
+            data = buffers["vbs"][agent_id]
+            if len(data["rewards"]) == 0:
+                continue
+            advs, rets = compute_gae(data["rewards"], data["values"], next_value=bootstrap_vbs[i])
+            batch_vbs["obs"].extend(data["obs"])
+            batch_vbs["masks"].extend(data["masks"])
+            batch_vbs["actions"].extend(data["actions"])
+            batch_vbs["logprobs"].extend(data["logprobs"])
+            batch_vbs["advantages"].extend(advs)
+            vbs_returns_by_agent.append(rets)
+            vbs_values_by_agent.append(data["values"])
 
-        for agent_type in ["vbs", "fbs"]:
-            target_batch = batch_vbs if agent_type == "vbs" else batch_fbs
-            type_values = joint_buffer[f"{agent_type}_values"]
-            for agent_id, data in buffers[agent_type].items():
-                if len(data["rewards"]) == 0:
-                    continue
-                # baseline now matches the reward distribution it's subtracted from
-                advs, _ = compute_gae(data["rewards"], type_values, next_value=bootstrap_value[agent_type])
-                target_batch["obs"].extend(data["obs"])
-                target_batch["masks"].extend(data["masks"])
-                target_batch["actions"].extend(data["actions"])
-                target_batch["logprobs"].extend(data["logprobs"])
-                target_batch["advantages"].extend(advs)
+        fbs_returns_by_agent, fbs_values_by_agent = [], []
+        for i, agent_id in enumerate(fbs_agent_order):
+            data = buffers["fbs"][agent_id]
+            if len(data["rewards"]) == 0:
+                continue
+            advs, rets = compute_gae(data["rewards"], data["values"], next_value=bootstrap_fbs[i])
+            batch_fbs["obs"].extend(data["obs"])
+            batch_fbs["masks"].extend(data["masks"])
+            batch_fbs["actions"].extend(data["actions"])
+            batch_fbs["logprobs"].extend(data["logprobs"])
+            batch_fbs["advantages"].extend(advs)
+            fbs_returns_by_agent.append(rets)
+            fbs_values_by_agent.append(data["values"])
 
         if len(batch_vbs["obs"]) > 0:
             ppo.update_actor(batch_vbs, "vbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
@@ -315,22 +387,26 @@ def main():
             ppo.update_actor(batch_fbs, "fbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
                              ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
-        # Critic: one team-level GAE pass over the joint-state sequence, decoupled from
-        # the per-agent actor batches above. Same corrected bootstrap_value applies here.
+        # Critic: team_head keeps its own scalar-per-step GAE pass, unchanged.
+        # vbs/fbs are transposed from (n_agents, T) to (T, n_agents) so each row
+        # lines up with the corresponding vbs_feats/fbs_feats row (one per
+        # environment step) that update_critic's forward pass consumes — see
+        # CentralizedCritic/update_critic BUG LEDGER for why this is now a
+        # per-agent-column target instead of a single type-mean column.
         _, team_returns = compute_gae(joint_buffer["team_rewards"], joint_buffer["team_values"],
                                       next_value=bootstrap_value["team"])
-        _, vbs_returns = compute_gae(joint_buffer["vbs_rewards"], joint_buffer["vbs_values"],
-                                     next_value=bootstrap_value["vbs"])
-        _, fbs_returns = compute_gae(joint_buffer["fbs_rewards"], joint_buffer["fbs_values"],
-                                     next_value=bootstrap_value["fbs"])
+        vbs_returns = [list(row) for row in zip(*vbs_returns_by_agent)] if vbs_returns_by_agent else []
+        vbs_values = [list(row) for row in zip(*vbs_values_by_agent)] if vbs_values_by_agent else []
+        fbs_returns = [list(row) for row in zip(*fbs_returns_by_agent)] if fbs_returns_by_agent else []
+        fbs_values = [list(row) for row in zip(*fbs_values_by_agent)] if fbs_values_by_agent else []
 
         ppo.update_critic({
             "vbs_feats": joint_buffer["vbs_feats"],
             "fbs_feats": joint_buffer["fbs_feats"],
             "global_extra": joint_buffer["global_extra"],
             "team_values": joint_buffer["team_values"], "team_returns": team_returns,
-            "vbs_values": joint_buffer["vbs_values"], "vbs_returns": vbs_returns,
-            "fbs_values": joint_buffer["fbs_values"], "fbs_returns": fbs_returns,
+            "vbs_values": vbs_values, "vbs_returns": vbs_returns,
+            "fbs_values": fbs_values, "fbs_returns": fbs_returns,
         }, vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
         # --- LOGGING PHASE ---
