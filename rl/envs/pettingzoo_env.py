@@ -23,6 +23,19 @@ class CoverageParallelEnv(ParallelEnv):
     # _compute_observations_and_masks for observation/mask feature widths.
     NUM_VBS_BRANCHES = 3
 
+    # FIXED: sensing_radius used to be an implicit, unbounded global broadcast —
+    # every agent's dx/dy gradient cue was derived from the mean of ALL uncovered
+    # users on the map, regardless of distance. That's both an observation-locality
+    # violation (no physical sensor gives an agent that global mean) and a bad
+    # reward-shaping heuristic (a single shared attractor point pulls every agent
+    # toward the same location, fighting the marginal-contribution reward's actual
+    # spread-out objective). Each agent's local sensing radius is now bounded and
+    # scaled off its OWN coverage_radius (a physically plausible sensor-range
+    # relationship: bigger radio footprint == bigger detection footprint),
+    # configurable via the "sensing_radius_multiplier" config key so this isn't a
+    # silent magic number.
+    DEFAULT_SENSING_RADIUS_MULTIPLIER = 2.5
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         # 1. Dependency Injection of High-Performance Adapters
@@ -34,6 +47,9 @@ class CoverageParallelEnv(ParallelEnv):
         self.max_cycles = config.get("max_cycles", 100)
         self.map_dim = self.graph_engine.get_map_dimension()
         self.max_slot_per_branch = float(config.get("max_slot_per_branch", 10))
+        self.sensing_radius_multiplier = float(
+            config.get("sensing_radius_multiplier", self.DEFAULT_SENSING_RADIUS_MULTIPLIER)
+        )
 
         self.possible_agents = (
             [f"vbs_{v.id}" for v in self.agent_manager.vbs_registry.values()] +
@@ -66,11 +82,17 @@ class CoverageParallelEnv(ParallelEnv):
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
         if "vbs" in agent:
+            # FIXED: branch_occupancy(3) (global broadcast across ALL VBS, no VBS has
+            # a sensor for this) removed per observation-locality fix; the shared
+            # global uncovered_centroid_dx_dy(2) is replaced with a per-agent,
+            # sensing_radius-bounded local_uncovered_dx_dy(2) + presence bit(1).
             # [norm_x, norm_y, coverage_frac, norm_slot, branch_hot(3),
-            #  home_branch_hot(3), branch_occupancy(3), uncovered_centroid_dx_dy(2)]  # last block from item 7
-            return spaces.Box(low=0.0, high=1.0, shape=(15 + self.n_vbs,), dtype=np.float32)
+            #  home_branch_hot(3), local_uncovered_dx_dy(2), local_uncovered_presence(1)]
+            return spaces.Box(low=0.0, high=1.0, shape=(13 + self.n_vbs,), dtype=np.float32)
         else:
-            return spaces.Box(low=0.0, high=1.0, shape=(15 + self.n_fbs,), dtype=np.float32)  # extended in items 6+7
+            # FIXED: same global-centroid replacement as VBS — dx_dy(2) -> dx_dy(2) +
+            # presence(1). branch_occupancy never applied to FBS, so no change there.
+            return spaces.Box(low=0.0, high=1.0, shape=(16 + self.n_fbs,), dtype=np.float32)  # extended in items 6+7
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Discrete:
@@ -313,19 +335,36 @@ class CoverageParallelEnv(ParallelEnv):
         total_users = self.sim_adapter.num_users
         NUM_BRANCHES = 3
 
-        # --- Shared relational features, computed ONCE per step (not per-agent) ---
-        branch_occupancy = np.zeros(NUM_BRANCHES, dtype=np.float32)
-        n_vbs = sum(1 for a in self.agents if "vbs" in a)
-        if n_vbs > 0:
-            for a in self.agents:
-                obj, is_vbs = self._get_agent_obj(a)
-                if is_vbs and obj.current_slot_index > 0 and 1 <= obj.current_branch_id <= NUM_BRANCHES:
-                    branch_occupancy[obj.current_branch_id - 1] += 1.0
-            branch_occupancy /= n_vbs
+        # BUG LEDGER — FIXED (observation-locality violation, 2 instances):
+        #
+        # 1. branch_occupancy used to be a global fraction ("what % of ALL VBS sit
+        #    on branch k") computed once and broadcast identically into every VBS's
+        #    local observation. No individual VBS has a sensor for this — it's
+        #    privileged, critic-only information. Removed from the per-agent actor
+        #    observation entirely (option (a) from the task): the CentralizedCritic
+        #    already has implicit access to every agent's state via its pooled
+        #    vbs_feats/fbs_feats input, so branch-selection coordination is learned
+        #    through the critic's baseline rather than leaked into the actor's local
+        #    obs. Preferred over option (b) (a locally-sensed "is MY branch occupied"
+        #    bit) because that would still require an ungrounded short-range-sensing
+        #    assumption for a feature the critic already sees for free — removing it
+        #    is strictly simpler and doesn't touch the critic (out of scope, Task 3).
+        #
+        # 2. uncovered_centroid used to be the mean of ALL uncovered users on the
+        #    map, computed once and broadcast into every agent's dx/dy. Beyond being
+        #    a locality violation, it was also a degenerate reward-shaping heuristic:
+        #    a single global mean is one shared attractor point that pulls every
+        #    agent toward the same location, fighting the marginal-contribution
+        #    reward's actual spread-out/minimize-overlap objective. Replaced with a
+        #    per-agent, sensing_radius-bounded local centroid (computed per-agent
+        #    below, from each agent's own (x, y) — a legitimate local computation)
+        #    plus an explicit presence bit distinguishing "nothing detected nearby"
+        #    (0) from "target is at my position" (dx=dy=0, presence=1).
 
-        # Uncovered-user centroid — item 7's relational gradient cue.
-        # Guard both the cold-start case (no coverage history yet) and the
-        # fully-covered case (empty uncovered set) with the same map-center fallback.
+        # Uncovered-user mask — still a one-time global computation, but it is only
+        # used below to build a candidate pool that each agent then filters down to
+        # its own sensing_radius. The filtering step (not this precursor) is what
+        # makes the resulting dx/dy/presence feature a legitimate per-agent quantity.
         if self.last_coverage_matrix is not None:
             any_covered_mask = np.any(self.last_coverage_matrix, axis=0)
             self.last_uncovered_grid = self.sim_adapter.compute_uncovered_density_grid(
@@ -337,10 +376,6 @@ class CoverageParallelEnv(ParallelEnv):
                 (self.uncovered_grid_size, self.uncovered_grid_size), dtype=np.float32
             )
             uncovered_coords = np.empty((0, 2), dtype=np.float32)
-        if len(uncovered_coords) > 0:
-            uncovered_centroid = uncovered_coords.mean(axis=0)
-        else:
-            uncovered_centroid = np.array(self.map_dim, dtype=np.float32) / 2.0
 
         # --- VBS EMA update pass, decoupled from iteration order for robustness ---
         # Explicit pre-pass rather than relying on "VBS happen to precede FBS in
@@ -368,9 +403,26 @@ class CoverageParallelEnv(ParallelEnv):
             else:
                 raw_coverage_frac = 0.0
 
-            # Relational gradient cue — identical derivation for both agent types
-            dx = np.clip((uncovered_centroid[0] - x) / self.map_dim[0], -1.0, 1.0)
-            dy = np.clip((uncovered_centroid[1] - y) / self.map_dim[1], -1.0, 1.0)
+            # Local, bounded relational gradient cue — identical derivation for both
+            # agent types, but now computed from THIS agent's own (x, y) and its own
+            # sensing_radius (scaled off its own coverage_radius), not a global mean.
+            sensing_radius = agent_obj.coverage_radius * self.sensing_radius_multiplier
+            if len(uncovered_coords) > 0:
+                local_dists = np.linalg.norm(uncovered_coords - np.array([x, y], dtype=np.float32), axis=1)
+                local_mask = local_dists <= sensing_radius
+            else:
+                local_mask = np.zeros(0, dtype=bool)
+            if np.any(local_mask):
+                local_centroid = uncovered_coords[local_mask].mean(axis=0)
+                dx = np.clip((local_centroid[0] - x) / self.map_dim[0], -1.0, 1.0)
+                dy = np.clip((local_centroid[1] - y) / self.map_dim[1], -1.0, 1.0)
+                uncovered_presence = 1.0
+            else:
+                # Nothing detected within sensing range — explicit zero vector +
+                # presence=0, distinguishable from "target is at my position"
+                # (dx=dy=0, presence=1).
+                dx, dy = 0.0, 0.0
+                uncovered_presence = 0.0
 
             if is_vbs:
                 agent_obj.update_ema(x, y)
@@ -392,10 +444,9 @@ class CoverageParallelEnv(ParallelEnv):
                     np.array([norm_x, norm_y, raw_coverage_frac, norm_slot,
                               branch_hot[0], branch_hot[1], branch_hot[2],
                               home_hot[0], home_hot[1], home_hot[2],
-                              branch_occupancy[0], branch_occupancy[1], branch_occupancy[2],
-                              dx, dy], dtype=np.float32),
+                              dx, dy, uncovered_presence], dtype=np.float32),
                     identity_hot
-                ])  # 15 + n_vbs dims
+                ])  # 13 + n_vbs dims
 
 
             else:
@@ -434,9 +485,9 @@ class CoverageParallelEnv(ParallelEnv):
                               host_branch_hot[0], host_branch_hot[1], host_branch_hot[2],
                               ema_x_norm, ema_y_norm,
                               host_true_x_norm, host_true_y_norm,
-                              dx, dy], dtype=np.float32),
+                              dx, dy, uncovered_presence], dtype=np.float32),
                     identity_hot
-                ])
+                ])  # 16 + n_fbs dims
 
             # FIXED: the old relative VBS action scheme masked the "advance" action
             # on the current branch once current_slot_index hit the max, to prevent
@@ -462,10 +513,14 @@ class CoverageParallelEnv(ParallelEnv):
         return obj, is_vbs
 
     def get_global_state(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # FIXED: fallback shapes here must track the per-agent obs dims declared in
+        # observation_space() — these drifted to the stale "15 + n" width when the
+        # observation-locality fix (branch_occupancy removal + local sensing
+        # presence bit) changed those widths to 13 (vbs) / 16 (fbs) + n.
         vbs_feats = np.stack([self._last_obs[a] for a in self.agents if "vbs" in a]) \
-            if any("vbs" in a for a in self.agents) else np.zeros((1, 15 + self.n_vbs), dtype=np.float32)
+            if any("vbs" in a for a in self.agents) else np.zeros((1, 13 + self.n_vbs), dtype=np.float32)
         fbs_feats = np.stack([self._last_obs[a] for a in self.agents if "fbs" in a]) \
-            if any("fbs" in a for a in self.agents) else np.zeros((1, 15 + self.n_fbs), dtype=np.float32)
+            if any("fbs" in a for a in self.agents) else np.zeros((1, 16 + self.n_fbs), dtype=np.float32)
         global_extra = np.concatenate([[self.last_true_coverage], self.last_uncovered_grid.flatten()])
         assert global_extra.shape[0] == self.global_extra_dim, "global_extra drifted from declared schema"
         return vbs_feats, fbs_feats, global_extra
