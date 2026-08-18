@@ -16,6 +16,13 @@ class CoverageParallelEnv(ParallelEnv):
         "name": "vbs_fbs_coverage_v1"
     }
 
+    # Branches incident to the center node. Hardcoded per current task scope —
+    # graph-topology generalization (variable branch counts) is out of scope.
+    # TODO(scope): derive this from graph_engine once variable-topology support
+    # is tasked; currently duplicated as a literal `NUM_BRANCHES = 3` in
+    # _compute_observations_and_masks for observation/mask feature widths.
+    NUM_VBS_BRANCHES = 3
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
         # 1. Dependency Injection of High-Performance Adapters
@@ -68,7 +75,11 @@ class CoverageParallelEnv(ParallelEnv):
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Discrete:
         if "vbs" in agent:
-            return spaces.Discrete(3)
+            # Absolute, factored (branch, slot) selection flattened into a single
+            # Discrete head — see BUG LEDGER in _apply_actions. slots_per_branch
+            # includes slot 0 (center), hence +1.
+            slots_per_branch = int(self.max_slot_per_branch) + 1
+            return spaces.Discrete(self.NUM_VBS_BRANCHES * slots_per_branch)
         else:
             return spaces.Discrete(17)
 
@@ -243,18 +254,36 @@ class CoverageParallelEnv(ParallelEnv):
 
     # --- INTERNAL MECHANICS ---
 
+    def _decode_vbs_action(self, action: int) -> Tuple[int, int]:
+        """Flattened Discrete(branches * (slots+1)) -> (branch_id, slot_index).
+
+        branch_id is 1-indexed (matches agent_obj.current_branch_id convention).
+        slot_index in [0, max_slot_per_branch].
+        """
+        slots_per_branch = int(self.max_slot_per_branch) + 1
+        branch_id = action // slots_per_branch + 1
+        slot_index = action % slots_per_branch
+        return branch_id, slot_index
+
     def _apply_actions(self, actions: Dict[str, int]):
+        # BUG LEDGER — FIXED: VBS actions used to be relative deltas: a chosen
+        # action only incremented current_slot_index if it matched
+        # current_branch_id, and decremented it otherwise. Reaching any target
+        # position therefore required a consistent multi-step action sequence.
+        # Because the marginal-contribution reward is recomputed every step as
+        # other agents move, the locally-perceived advantage sign could flip
+        # mid-transit, producing a stable 2-state limit cycle with no absorbing
+        # target state. VBS actions are now an absolute, factored (branch, slot)
+        # selection — flattened into a single Discrete head and decoded via
+        # _decode_vbs_action — mirroring the FBS 17-point discretized
+        # offset-zone fix. current_branch_id/current_slot_index are assigned
+        # directly from the decode with no dependency on the previous state.
         for agent_id, action in actions.items():
             agent_obj, is_vbs = self._get_agent_obj(agent_id)
             if is_vbs:
-                if agent_obj.current_slot_index == 0:
-                    agent_obj.current_branch_id = action + 1
-                    agent_obj.current_slot_index += 1
-                else:
-                    if action == agent_obj.current_branch_id - 1:
-                        agent_obj.current_slot_index = min(10, agent_obj.current_slot_index + 1)
-                    else:
-                        agent_obj.current_slot_index = max(0, agent_obj.current_slot_index - 1)
+                branch_id, slot_index = self._decode_vbs_action(int(action))
+                agent_obj.current_branch_id = branch_id
+                agent_obj.current_slot_index = slot_index
             else:
                 agent_obj.current_offset_zone = action
 
@@ -409,9 +438,13 @@ class CoverageParallelEnv(ParallelEnv):
                     identity_hot
                 ])
 
+            # FIXED: the old relative VBS action scheme masked the "advance" action
+            # on the current branch once current_slot_index hit the max, to prevent
+            # overshoot past the branch end. Under the absolute (branch, slot)
+            # selection every action decodes to a valid, in-range absolute state
+            # (see _decode_vbs_action), so overshoot is structurally impossible and
+            # no VBS masking is needed here anymore.
             mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
-            if is_vbs and agent_obj.current_slot_index >= 10:
-                mask[agent_obj.current_branch_id - 1] = 0
 
             infos[agent_id] = {"action_mask": mask}
 
