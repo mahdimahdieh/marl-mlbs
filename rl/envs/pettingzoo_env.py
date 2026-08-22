@@ -35,6 +35,9 @@ class CoverageParallelEnv(ParallelEnv):
     # configurable via the "sensing_radius_multiplier" config key so this isn't a
     # silent magic number.
     DEFAULT_SENSING_RADIUS_MULTIPLIER = 2.5
+    # FIXED: no incentive to solve fast vs. linger. One-time bonus on the
+    # terminating step, scaled by steps saved vs max_cycles.
+    TERMINAL_SPEED_BONUS = 5.0
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__()
@@ -265,6 +268,14 @@ class CoverageParallelEnv(ParallelEnv):
         # are full. With FBS radius=45 at step 1, true_coverage ≈ 0.63 — the
         # episode will now run for max_cycles steps until PPO optimises agent spread.
         env_termination = true_coverage_efficiency >= self.termination_goal
+
+        # FIXED: reward positive shaped reward per step, so nothing pushed
+        # the policy to finish early vs. hover near the goal. Flat bonus,
+        # same for every agent, scaled by fraction of budget saved.
+        if env_termination:
+            speed_bonus = self.TERMINAL_SPEED_BONUS * (self.max_cycles - self.step_count) / self.max_cycles
+            for agent_id in rewards:
+                rewards[agent_id] += speed_bonus
 
         terminations = {agent: env_termination for agent in self.agents}
         truncations = {agent: env_truncation for agent in self.agents}
