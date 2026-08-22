@@ -89,11 +89,11 @@ class CoverageParallelEnv(ParallelEnv):
             # sensing_radius-bounded local_uncovered_dx_dy(2) + presence bit(1).
             # [norm_x, norm_y, coverage_frac, norm_slot, branch_hot(3),
             #  home_branch_hot(3), local_uncovered_dx_dy(2), local_uncovered_presence(1)]
-            return spaces.Box(low=0.0, high=1.0, shape=(13 + self.n_vbs,), dtype=np.float32)
+            return spaces.Box(low=-1.0, high=1.0, shape=(13 + self.n_vbs,), dtype=np.float32)
         else:
             # FIXED: same global-centroid replacement as VBS — dx_dy(2) -> dx_dy(2) +
             # presence(1). branch_occupancy never applied to FBS, so no change there.
-            return spaces.Box(low=0.0, high=1.0, shape=(16 + self.n_fbs,), dtype=np.float32)  # extended in items 6+7
+            return spaces.Box(low=-1.0, high=1.0, shape=(16 + self.n_fbs,), dtype=np.float32)  # extended in items 6+7
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Discrete:
@@ -319,7 +319,7 @@ class CoverageParallelEnv(ParallelEnv):
             if agent_obj.current_slot_index == 0:
                 return self.graph_engine.get_edge_coordinates(0, 1, 0.0)
             else:
-                traveled = agent_obj.current_slot_index / 10.0
+                traveled = agent_obj.current_slot_index / self.max_slot_per_branch
                 return self.graph_engine.get_edge_coordinates(0, agent_obj.current_branch_id, traveled)
         else:
             host_vbs = self.agent_manager.vbs_registry[agent_obj.host_vbs_id]

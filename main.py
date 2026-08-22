@@ -65,7 +65,7 @@ def bootstrap_environment(config_path: str, graph_path: str):
         # Without this, CoverageParallelEnv ignores simulation_config.json entirely
         # for these parameters and falls back to hardcoded defaults on every run.
         "center_node_id": config.get("graph_settings", {}).get("center_node_id", 0),
-        "max_slots_per_branch": config.get("graph_settings", {}).get("max_slots_per_branch", 10),
+        "max_slot_per_branch": config.get("graph_settings", {}).get("max_slots_per_branch", 10),
     }
 
     return env_config, config["hyperparameters"], config
@@ -136,7 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train VBS/FBS Base Stations")
     parser.add_argument("--config", type=str, default="config/simulation_config.json")
     parser.add_argument("--graph", type=str, default="config/graph_map.json")
-    parser.add_argument("--episodes", type=int, default=5000)
+    parser.add_argument("--episodes", type=int, default=2000)
     parser.add_argument("--save-dir", type=str, default="models")
     parser.add_argument("--save-every", type=int, default=250)
     parser.add_argument("--log-every", type=int, default=10,
@@ -191,7 +191,7 @@ def main():
 
     data_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     save_dir = os.path.join(args.save_dir, data_time)
-    os.mkdir(save_dir)
+    os.makedirs(save_dir, exist_ok=True)
 
     # BUG LEDGER #3 FIX: these used to be seeded with a single 0.0 and never
     # appended to anywhere in the loop, so every "avg100" value ever printed

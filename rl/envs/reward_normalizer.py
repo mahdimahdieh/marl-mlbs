@@ -3,7 +3,7 @@ import numpy as np
 class RunningNorm:
     """Welford's online algorithm — single-pass mean/std, no stored history."""
     def __init__(self, eps: float = 1e-4, freeze_after: int = None):
-        self.mean, self.var, self.count = 0.0, 1.0, eps
+        self.mean, self.var, self.count = 0.0, 0.0, eps
         self.freeze_after = freeze_after
         self.frozen = False
 

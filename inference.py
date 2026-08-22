@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
+from infrastructure.training.determinism import lock_determinism
 from main import bootstrap_environment
 from rl.agents.ppo_module import HeterogeneousPPOManager
 from rl.envs.pettingzoo_env import CoverageParallelEnv
@@ -254,6 +255,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    lock_determinism(args.seed)
 
     if args.save_frames_dir and args.headless:
         raise SystemExit("--save-frames-dir requires rendering; it cannot be combined with --headless.")
