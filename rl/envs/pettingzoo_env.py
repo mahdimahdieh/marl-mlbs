@@ -78,6 +78,7 @@ class CoverageParallelEnv(ParallelEnv):
 
         self.n_vbs = len(self.agent_manager.vbs_registry)
         self.n_fbs = len(self.agent_manager.fbs_registry)
+        self._last_obs: Dict[str, np.ndarray] = {}
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
@@ -195,6 +196,10 @@ class CoverageParallelEnv(ParallelEnv):
         MARGINAL_WEIGHT = 0.65        # Individual Shapley-value approximation
         TEAM_WEIGHT = 0.3            # Shared cooperative gradient
         OVERLAP_PENALTY_WEIGHT = 0.05 # Explicit redundancy suppressor
+
+        # FIXED: team_norm.update() was never called, so normalize() ran on a
+        # frozen cold-start init. Update once per step, not per agent.
+        self.team_norm.update(true_coverage_efficiency)
 
         rewards = {}
         for i, agent_id in enumerate(self.agents):
@@ -513,14 +518,17 @@ class CoverageParallelEnv(ParallelEnv):
         return obj, is_vbs
 
     def get_global_state(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # FIXED: fallback shapes here must track the per-agent obs dims declared in
-        # observation_space() — these drifted to the stale "15 + n" width when the
-        # observation-locality fix (branch_occupancy removal + local sensing
-        # presence bit) changed those widths to 13 (vbs) / 16 (fbs) + n.
-        vbs_feats = np.stack([self._last_obs[a] for a in self.agents if "vbs" in a]) \
-            if any("vbs" in a for a in self.agents) else np.zeros((1, 13 + self.n_vbs), dtype=np.float32)
-        fbs_feats = np.stack([self._last_obs[a] for a in self.agents if "fbs" in a]) \
-            if any("fbs" in a for a in self.agents) else np.zeros((1, 16 + self.n_fbs), dtype=np.float32)
+        # FIXED: filtering by self.agents broke post-terminal-step callers
+        # (main.py's truncation bootstrap) since step() clears self.agents
+        # before returning. _last_obs.keys() reflects the real last snapshot.
+        vbs_ids = [a for a in self._last_obs if "vbs" in a]
+        fbs_ids = [a for a in self._last_obs if "fbs" in a]
+
+        vbs_feats = np.stack([self._last_obs[a] for a in vbs_ids]) \
+            if vbs_ids else np.zeros((1, 13 + self.n_vbs), dtype=np.float32)
+        fbs_feats = np.stack([self._last_obs[a] for a in fbs_ids]) \
+            if fbs_ids else np.zeros((1, 16 + self.n_fbs), dtype=np.float32)
+
         global_extra = np.concatenate([[self.last_true_coverage], self.last_uncovered_grid.flatten()])
         assert global_extra.shape[0] == self.global_extra_dim, "global_extra drifted from declared schema"
         return vbs_feats, fbs_feats, global_extra
