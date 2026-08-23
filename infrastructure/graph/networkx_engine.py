@@ -1,5 +1,6 @@
 import json
 from typing import Tuple, Hashable
+import numpy as np
 import networkx as nx
 
 
@@ -47,3 +48,9 @@ class NetworkXRoadEngine:
             return x, y
         else:
             raise NotImplementedError(f"Edge type {edge_data['type']} not implemented")
+
+    def get_action_mask(self, current_branch_id: int) -> np.ndarray:
+        # Absolute (branch, slot) actions can't overshoot (see
+        # _decode_vbs_action) — no restriction possible today.
+        # STEP 1's slot count is read by the caller, not here.
+        return np.ones(1, dtype=np.int8)  # caller resizes; see call site note below

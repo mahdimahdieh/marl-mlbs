@@ -247,7 +247,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--fixed-seed", action="store_true", help="Reuse the same seed for every episode instead of incrementing.")
     p.add_argument("--stochastic", action="store_true", help="Sample actions instead of using the deterministic policy.")
     p.add_argument("--headless", action="store_true", help="Run without opening a window. Never imports pygame.")
-    p.add_argument("--fps", type=float, default=2.0, help="Rendering frame rate when not headless.")
+    p.add_argument("--fps", type=float, default=1.0, help="Rendering frame rate when not headless.")
     p.add_argument("--save-frames-dir", default=None, help="If set (and not --headless), dump each rendered frame as a PNG here.")
     p.add_argument("--summary-json", default=None, help="If set, write aggregate + per-episode metrics to this JSON file.")
     return p

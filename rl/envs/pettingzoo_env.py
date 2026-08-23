@@ -197,8 +197,8 @@ class CoverageParallelEnv(ParallelEnv):
         # Tune these three weights as hyperparameters if the graph layout changes:
         REWARD_SCALE = 1.0          # Scales reward to [≈-7.3, ≈10.4] — stable for PPO clip=0.2
         MARGINAL_WEIGHT = 0.65        # Individual Shapley-value approximation
-        TEAM_WEIGHT = 0.3            # Shared cooperative gradient
-        OVERLAP_PENALTY_WEIGHT = 0.05 # Explicit redundancy suppressor
+        TEAM_WEIGHT = 0.15            # Shared cooperative gradient
+        OVERLAP_PENALTY_WEIGHT = 0.20 # Explicit redundancy suppressor
 
         # FIXED: team_norm.update() was never called, so normalize() ran on a
         # frozen cold-start init. Update once per step, not per agent.
@@ -334,9 +334,7 @@ class CoverageParallelEnv(ParallelEnv):
                 return self.graph_engine.get_edge_coordinates(0, agent_obj.current_branch_id, traveled)
         else:
             host_vbs = self.agent_manager.vbs_registry[agent_obj.host_vbs_id]
-            hx, hy = host_vbs.ema_x, host_vbs.ema_y
-            if hx is None:
-                hx, hy = self._calculate_world_coords(host_vbs, True)  # cold start
+            hx, hy = self._calculate_world_coords(host_vbs, True)
             if agent_obj.current_offset_zone == 0:
                 return hx, hy
             dist_multiplier = 0.5 if agent_obj.current_offset_zone <= 8 else 1.0
@@ -511,7 +509,9 @@ class CoverageParallelEnv(ParallelEnv):
             # selection every action decodes to a valid, in-range absolute state
             # (see _decode_vbs_action), so overshoot is structurally impossible and
             # no VBS masking is needed here anymore.
-            mask = np.ones(self.action_space(agent_id).n, dtype=np.int8)
+            # Delegates to GraphEngineABC contract now implemented by NetworkXRoadEngine.
+            mask = np.ones(self.action_space(agent_id).n, dtype=np.int8) if not is_vbs \
+                else self.graph_engine.get_action_mask(self.action_space(agent_id).n)
 
             infos[agent_id] = {"action_mask": mask}
 

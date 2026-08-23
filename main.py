@@ -74,16 +74,12 @@ def bootstrap_environment(config_path: str, graph_path: str):
 def _broadcast_bootstrap(vals: List[float], n_agents: int) -> List[float]:
     """Normalize a per-agent bootstrap-value list to exactly n_agents entries.
 
-    TODO(scope): CoverageParallelEnv.get_global_state() falls back to a single
-    zero-padded row whenever self.agents is empty -- which it always is by the
-    time the truncated-episode bootstrap call runs, since
-    CoverageParallelEnv.step() clears self.agents before returning on the
-    terminating step. That means the "bootstrap from the critic's own V(s_T)"
-    estimate (bug ledger #5) is actually V(zeros) whenever an episode ends,
-    not the real final observed state -- a pre-existing issue, unrelated to
-    the granularity mismatch this function guards against, and out of scope
-    for this task. This helper only prevents that pre-existing shape quirk
-    from crashing the newly per-agent-indexed bootstrap lookup below.
+    NOTE: get_global_state() no longer zero-pads on truncation — it keys off
+    _last_obs, populated pre-clear in step()'s Phase 6 (see
+    test_get_global_state_after_truncation_returns_real_features_not_zeros).
+    The only remaining zero-fallback case is pre-reset, before any episode
+    has run (see test_get_global_state_before_any_reset_uses_empty_fallback),
+    which this helper still guards defensively.
     """
     if len(vals) == n_agents:
         return vals
