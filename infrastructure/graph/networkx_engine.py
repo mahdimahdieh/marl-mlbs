@@ -53,4 +53,4 @@ class NetworkXRoadEngine:
         # Absolute (branch, slot) actions can't overshoot (see
         # _decode_vbs_action) — no restriction possible today.
         # STEP 1's slot count is read by the caller, not here.
-        return np.ones(1, dtype=np.int8)  # caller resizes; see call site note below
+        return np.ones(current_branch_id, dtype=np.int8)  # caller resizes; see call site note below

@@ -83,6 +83,9 @@ class CoverageParallelEnv(ParallelEnv):
         self.n_fbs = len(self.agent_manager.fbs_registry)
         self._last_obs: Dict[str, np.ndarray] = {}
 
+        self.overlap_penalty_warmup_episodes = config.get("overlap_penalty_warmup_episodes", 200)
+        self._episode_count = 0
+
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Box:
         if "vbs" in agent:
@@ -111,6 +114,7 @@ class CoverageParallelEnv(ParallelEnv):
 
     def reset(self, seed: int = None, options: Dict = None) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         self.agents = self.possible_agents[:]
+        self._episode_count += 1
         self.step_count = 0
 
         # Clear coverage snapshots so _compute_observations_and_masks knows it is
@@ -198,7 +202,10 @@ class CoverageParallelEnv(ParallelEnv):
         REWARD_SCALE = 1.0          # Scales reward to [≈-7.3, ≈10.4] — stable for PPO clip=0.2
         MARGINAL_WEIGHT = 0.65        # Individual Shapley-value approximation
         TEAM_WEIGHT = 0.15            # Shared cooperative gradient
-        OVERLAP_PENALTY_WEIGHT = 0.20 # Explicit redundancy suppressor
+        # FIXED: full penalty from ep 1 punished redundancy before marginal_contribution
+        # taught "cover something" -> retreat-to-zero-coverage local optimum. Ramp in.
+        warmup = min(self._episode_count / max(self.overlap_penalty_warmup_episodes, 1), 1.0)
+        OVERLAP_PENALTY_WEIGHT = 0.20 * warmup
 
         # FIXED: team_norm.update() was never called, so normalize() ran on a
         # frozen cold-start init. Update once per step, not per agent.
@@ -341,7 +348,9 @@ class CoverageParallelEnv(ParallelEnv):
             angle_idx = (agent_obj.current_offset_zone - 1) % 8
             angle = angle_idx * (np.pi / 4)
             radius = agent_obj.maximum_distance * dist_multiplier
-            return hx + radius * np.cos(angle), hy + radius * np.sin(angle)
+            x, y = hx + radius * np.cos(angle), hy + radius * np.sin(angle)
+            # FIXED: only obs was clipped before, not physical coords -> overshoot invisible to reward
+            return float(np.clip(x, 0.0, self.map_dim[0])), float(np.clip(y, 0.0, self.map_dim[1]))
 
     def _compute_observations_and_masks(self) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         obs = {}
