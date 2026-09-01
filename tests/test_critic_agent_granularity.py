@@ -117,9 +117,107 @@ def test_update_critic_accepts_per_agent_return_matrices():
         "vbs_returns": rng.standard_normal((T, n_vbs)).astype(np.float32).tolist(),
         "fbs_values": rng.standard_normal((T, n_fbs)).astype(np.float32).tolist(),
         "fbs_returns": rng.standard_normal((T, n_fbs)).astype(np.float32).tolist(),
+        # Task 4: the training forward pass must accept (and use) the same
+        # relational host-pairing cue the rollout-time get_value() receives.
+        "fbs_host_vbs_indices": [2, 1],
     }
     # Should not raise.
     ppo.update_critic(joint_batch, ppo_epochs=1, batch_size=4)
+
+
+# --- Task 4: relational / topology-aware critic trunk ----------------------- #
+
+def test_critic_relational_conditioning_uses_host_pairing():
+    """The whole point of the Task 4 trunk: IDENTICAL vbs/fbs feature sets but
+    a DIFFERENT FBS->host-VBS tether mapping must produce different outputs.
+    If the critic still pooled FBS encodings symmetrically (bag of FBS), the
+    host mapping would be invisible and both calls would return identical
+    values — exactly the relational information the old mean/max Deep-Sets
+    pooling destroyed."""
+    torch.manual_seed(0)
+    n_vbs, n_fbs, vbs_dim, fbs_dim, extra_dim = 2, 2, 13, 16, 5
+    critic = CentralizedCritic(vbs_dim, fbs_dim, extra_dim)
+    critic.eval()
+
+    vbs_feats = torch.randn(1, n_vbs, vbs_dim)
+    fbs_feats = torch.randn(1, n_fbs, fbs_dim)
+    global_extra = torch.randn(1, extra_dim)
+
+    with torch.no_grad():
+        both_on_host_0 = critic(vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=[0, 0])
+        split_hosts = critic(vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=[0, 1])
+
+    assert not torch.allclose(both_on_host_0["fbs"], split_hosts["fbs"]), (
+        "per-FBS values must depend on WHICH VBS hosts each FBS — "
+        "identical outputs mean the tether relation is still being pooled away"
+    )
+    assert not torch.allclose(both_on_host_0["team"], split_hosts["team"]), (
+        "the team value must see the relational (VBS, FBS-group) structure, "
+        "not just a symmetric bag of FBS encodings"
+    )
+
+
+def test_critic_permutation_invariant_across_disjoint_pairs():
+    """Task 4 invariance contract: permuting whole (VBS, FBS) tether PAIRS must
+    leave the team value unchanged and permute the per-agent values along with
+    the rows. Only the intra-pair relational context may (must!) be retained —
+    the pair permutation here never breaks an FBS away from its host."""
+    torch.manual_seed(1)
+    n_vbs, n_fbs, vbs_dim, fbs_dim, extra_dim = 3, 3, 13, 16, 5
+    critic = CentralizedCritic(vbs_dim, fbs_dim, extra_dim)
+    critic.eval()
+
+    vbs_feats = torch.randn(1, n_vbs, vbs_dim)
+    fbs_feats = torch.randn(1, n_fbs, fbs_dim)
+    global_extra = torch.randn(1, extra_dim)
+    hosts = [0, 1, 2]  # disjoint pairs: (vbs_i, fbs_i)
+
+    with torch.no_grad():
+        out = critic(vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=hosts)
+
+    # Jointly permute the disjoint pairs: new row j holds old pair pi[j].
+    pi = [2, 0, 1]
+    vbs_feats_p = vbs_feats[:, pi]
+    fbs_feats_p = fbs_feats[:, pi]
+    # Old fbs pi[j] was hosted by old vbs hosts[pi[j]], which now sits at row
+    # pi.index(hosts[pi[j]]) in the permuted VBS ordering.
+    hosts_p = [pi.index(hosts[pi[j]]) for j in range(n_fbs)]
+
+    with torch.no_grad():
+        out_p = critic(vbs_feats_p, fbs_feats_p, global_extra, fbs_host_vbs_indices=hosts_p)
+
+    assert torch.allclose(out["team"], out_p["team"], atol=1e-5), (
+        "team value must be invariant to permuting whole (VBS, FBS) pairs"
+    )
+    assert torch.allclose(out["vbs"][:, pi], out_p["vbs"], atol=1e-5), (
+        "per-agent VBS values must permute with the rows, nothing more"
+    )
+    assert torch.allclose(out["fbs"][:, pi], out_p["fbs"], atol=1e-5), (
+        "per-agent FBS values must permute with the rows, nothing more"
+    )
+
+
+def test_critic_permutation_invariant_within_shared_host_group():
+    """Two FBS tethered to the SAME host form an unordered group: swapping
+    them (while keeping the host VBS rows fixed) must leave the team value AND
+    the per-agent values unchanged — the set of (host, FBS) pairs is identical."""
+    torch.manual_seed(2)
+    n_vbs, n_fbs, vbs_dim, fbs_dim, extra_dim = 2, 2, 13, 16, 5
+    critic = CentralizedCritic(vbs_dim, fbs_dim, extra_dim)
+    critic.eval()
+
+    vbs_feats = torch.randn(1, n_vbs, vbs_dim)
+    fbs_feats = torch.randn(1, n_fbs, fbs_dim)
+    global_extra = torch.randn(1, extra_dim)
+
+    with torch.no_grad():
+        out = critic(vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=[0, 0])
+        out_swapped = critic(vbs_feats, fbs_feats[:, [1, 0]], global_extra,
+                             fbs_host_vbs_indices=[0, 0])
+
+    assert torch.allclose(out["team"], out_swapped["team"], atol=1e-5)
+    assert torch.allclose(out["vbs"], out_swapped["vbs"], atol=1e-5)
+    assert torch.allclose(out["fbs"][:, [1, 0]], out_swapped["fbs"], atol=1e-5)
 
 
 @pytest.fixture

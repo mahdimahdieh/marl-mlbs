@@ -7,6 +7,7 @@ from core.entities.agents import AgentManager, VehicleBaseStation, FlyingBaseSta
 from infrastructure.graph.networkx_engine import NetworkXRoadEngine
 from infrastructure.simulation.pywisim_adapter import PyWiSimAdapter
 from rl.envs.pettingzoo_env import CoverageParallelEnv
+from rl.envs.reward_normalizer import StationaryScaler
 
 GRAPH_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "graph_map.json")
 
@@ -56,43 +57,87 @@ def _run_random_steps(env, n_steps, seed=0):
     return terminated, truncated
 
 
-# --- Bug #1: team_norm must actually update -------------------------------- #
+# --- Task 1: reward scaling must be STATIONARY, not a running normalizer ---- #
+# The original bug: team_norm (a RunningNorm) tracked the live policy's
+# coverage stream. As coverage converged to ~0.95, mean -> 0.95 and
+# normalize() -> (0.95 - 0.95)/std ~ 0.0: the positive reward terms vanished
+# exactly at the goal while overlap penalties survived, collapsing episodic
+# reward from +20.75 to -160.16 at ~98% coverage. Bounded [0, 1] metrics now
+# pass through a fixed StationaryScaler.
 
-def test_team_norm_updates_across_rollout():
+def test_bounded_reward_metrics_use_stationary_scaler_not_running_norm():
     env, _, _ = make_env(max_cycles=5)
     env.reset(seed=0)
 
-    initial_count = env.team_norm.count
-    initial_mean = env.team_norm.mean
-    assert initial_count == pytest.approx(1e-4)
+    assert isinstance(env.team_scaler, StationaryScaler), (
+        "true_coverage_efficiency must be scaled by a fixed StationaryScaler, "
+        "not an adaptive RunningNorm (moving goalposts bug)"
+    )
+    assert isinstance(env.marginal_scaler, StationaryScaler), (
+        "marginal_contribution must be scaled by a fixed StationaryScaler, "
+        "not an adaptive RunningNorm (moving goalposts bug)"
+    )
+    for forbidden in ("team_norm", "marginal_norm"):
+        assert not hasattr(env, forbidden), (
+            f"env still exposes '{forbidden}' — online normalization of bounded "
+            "metrics must not exist (Task 1)"
+        )
 
+    # Deterministic, monotonic, time-invariant scaling of raw coverage.
+    assert env.team_scaler(0.0) == pytest.approx(0.0)
+    assert env.team_scaler(0.60) < env.team_scaler(0.95) < env.team_scaler(1.0)
+
+
+def test_reward_signal_is_stationary_across_episodes():
+    """The core Task-1 regression: identical (seed, actions) must produce
+    IDENTICAL per-step rewards in episode 1 and in a later episode. The old
+    RunningNorm accumulated statistics across episodes, so the same coverage
+    state was worth progressively less reward as training proceeded — the
+    'reward plummets while coverage rises' signature."""
+    env, _, _ = make_env(max_cycles=5)
+
+    def run_episode(seed=0):
+        env.reset(seed=seed)
+        rewards_per_step = []
+        while env.agents:
+            rewards_per_step.append(
+                env.step({a: 0 for a in env.agents})[1]
+            )
+        return rewards_per_step
+
+    first_episode = run_episode()
+    assert len(first_episode) > 0
+
+    # Accumulate "history" — with RunningNorm these extra episodes would shift
+    # the normalizer statistics and devalue the identical later episode.
+    for _ in range(3):
+        run_episode()
+
+    later_episode = run_episode()
+    assert len(later_episode) == len(first_episode)
+    for t, (r_first, r_later) in enumerate(zip(first_episode, later_episode)):
+        assert r_first == pytest.approx(r_later), (
+            f"step {t}: reward drifted between identical episodes "
+            f"({r_first} -> {r_later}) — reward scaling is non-stationary"
+        )
+
+
+def test_high_coverage_yields_monotonic_positive_team_reward_term():
+    """Maintaining high coverage must stay a positive, monotonic signal at ALL
+    times (the old normalizer zeroed it out at the top of the range)."""
+    env, _, _ = make_env(max_cycles=5)
+    env.reset(seed=0)
+
+    # Before AND after a long interaction history, the team term for high
+    # coverage must be strictly larger than for low coverage, and positive.
     for _ in range(4):
         if not env.agents:
             break
         env.step({a: 0 for a in env.agents})
 
-    assert env.team_norm.count > initial_count, (
-        "team_norm.count did not increase -- update() is not being called during step()"
-    )
-    assert env.team_norm.mean != pytest.approx(initial_mean) or env.team_norm.count > 4, (
-        "team_norm.mean appears frozen at its cold-start value"
-    )
-
-
-def test_team_norm_updated_once_per_step_not_once_per_agent():
-    env, manager, _ = make_env(num_vbs=3, num_fbs=1, max_cycles=5)
-    env.reset(seed=0)
-    n_agents = len(env.agents)
-    assert n_agents == 4
-
-    count_before = env.team_norm.count
-    env.step({a: 0 for a in env.agents})
-    count_after = env.team_norm.count
-
-    assert count_after == pytest.approx(count_before + 1), (
-        f"team_norm.count increased by {count_after - count_before} with {n_agents} agents "
-        "-- expected exactly +1 (update() called once per step, not once per agent)"
-    )
+    low, high = env.team_scaler(0.30), env.team_scaler(0.98)
+    assert high > low
+    assert high > 0.0, "high coverage must yield a strictly positive reward term"
 
 
 # --- Bug #2: get_global_state() after a terminal step must not zero out ---- #
@@ -158,8 +203,8 @@ def test_get_global_state_before_any_reset_uses_empty_fallback():
 
     vbs_feats, fbs_feats, global_extra = env.get_global_state()
 
-    assert vbs_feats.shape == (1, 13 + env.n_vbs)
-    assert fbs_feats.shape == (1, 16 + env.n_fbs)
+    assert vbs_feats.shape == (1, env.vbs_fixed_obs_dim + env.n_vbs)
+    assert fbs_feats.shape == (1, env.fbs_fixed_obs_dim + env.n_fbs)
     assert global_extra.shape[0] == env.global_extra_dim
 
 

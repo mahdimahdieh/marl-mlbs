@@ -10,8 +10,17 @@ gate for the bugs fixed in Tasks 1-3:
   Task 2 (observation locality): uncovered_centroid used to be a single
   global mean broadcast into every agent's dx/dy (a degenerate shared
   attractor); branch_occupancy leaked global team state into the per-agent
-  actor observation. Fixed to a per-agent, sensing_radius-bounded local
-  centroid + presence bit, with branch_occupancy removed.
+  actor observation. Fixed to a per-agent, sensing_radius-bounded directional
+  sector histogram + presence bit, with branch_occupancy removed.
+
+  Task 3 (local sensing dead-zone): the per-agent local cue was upgraded from
+  a single vector-mean (dx, dy) — which cancelled to (0, 0) when an agent sat
+  between symmetric clusters of uncovered users — to an 8-sector directional
+  histogram of locally detected uncovered users (fractions per 45° sector,
+  summing to 1.0 iff something is detected) plus a presence bit. The
+  observation_space() widths below pin the new schema:
+      VBS: 10 fixed + 8 sector bins + 1 presence  + n_vbs identity
+      FBS: 13 fixed + 8 sector bins + 1 presence  + n_fbs identity
 
   Task 3 (critic granularity): out of scope for this file — see
   tests/test_critic_agent_granularity.py.
@@ -99,7 +108,8 @@ def test_vbs_observation_space_matches_actual_obs_shape():
     obs_dict, _ = env.reset(seed=0)
 
     declared_shape = env.observation_space("vbs_0").shape
-    assert declared_shape == (13 + env.n_vbs,)
+    # 10 fixed (pos/coverage/slot/branch_hot/home_hot) + 8 sector bins + 1 presence
+    assert declared_shape == (10 + env.NUM_LOCAL_SECTOR_BINS + 1 + env.n_vbs,)
     assert obs_dict["vbs_0"].shape == declared_shape
 
 
@@ -108,7 +118,8 @@ def test_fbs_observation_space_matches_actual_obs_shape():
     obs_dict, _ = env.reset(seed=0)
 
     declared_shape = env.observation_space("fbs_2").shape
-    assert declared_shape == (16 + env.n_fbs,)
+    # 13 fixed (pos/coverage/polar/host_branch/ema/host_true) + 8 sector bins + 1 presence
+    assert declared_shape == (13 + env.NUM_LOCAL_SECTOR_BINS + 1 + env.n_fbs,)
     assert obs_dict["fbs_2"].shape == declared_shape
 
 
@@ -174,19 +185,20 @@ def test_vbs_repeated_identical_action_is_idempotent():
 
 
 # --------------------------------------------------------------------------- #
-# 1c. Task 2 regression: local sensing zero-vector / agent-specific signal    #
+# 1c. Task 2/3 regression: local sensing sector histogram / agent-specific    #
 # --------------------------------------------------------------------------- #
 
-def _extract_local_signal(obs_row, n_vbs):
-    """VBS obs layout: [..., dx, dy, presence, identity_hot(n_vbs)] — see
-    observation_space()'s documented feature order."""
-    dx = obs_row[-3 - n_vbs]
-    dy = obs_row[-2 - n_vbs]
-    presence = obs_row[-1 - n_vbs]
-    return float(dx), float(dy), float(presence)
+def _extract_local_signal(obs_row, n_identities):
+    """Obs layout tail (both agent types): [local_sector_fracs(8),
+    local_uncovered_presence(1), identity_hot(n)] — see observation_space()'s
+    documented feature order."""
+    n_bins = CoverageParallelEnv.NUM_LOCAL_SECTOR_BINS
+    presence = float(obs_row[-1 - n_identities])
+    sector_fracs = obs_row[-(1 + n_identities + n_bins): -1 - n_identities]
+    return sector_fracs, presence
 
 
-def test_local_sensing_returns_zero_vector_and_zero_presence_when_nothing_in_range():
+def test_local_sensing_returns_zero_sectors_and_zero_presence_when_nothing_in_range():
     env, manager, sim_adapter = make_env(num_vbs=1, coverage_radius=2.0, sensing_radius_multiplier=1.0)
     env.reset(seed=0)
     vbs0 = manager.vbs_registry[0]
@@ -201,20 +213,20 @@ def test_local_sensing_returns_zero_vector_and_zero_presence_when_nothing_in_ran
     env.last_coverage_matrix = np.zeros((len(env.agents), sim_adapter.num_users), dtype=bool)
 
     obs, _ = env._compute_observations_and_masks()
-    dx, dy, presence = _extract_local_signal(obs["vbs_0"], env.n_vbs)
+    sector_fracs, presence = _extract_local_signal(obs["vbs_0"], env.n_vbs)
 
     assert presence == 0.0
-    assert dx == 0.0
-    assert dy == 0.0
+    assert np.all(sector_fracs == 0.0)
 
 
 def test_local_sensing_nonzero_and_agent_specific_with_asymmetric_ground_truth():
     """Direct regression test for the global-centroid mode-collapse bug: place
     a single uncovered user near vbs_0 ONLY. vbs_0 must detect it (presence=1,
-    nonzero dx/dy); vbs_1, far away with nothing nearby, must NOT (presence=0,
-    dx=dy=0). If a future regression reintroduces a global mean, both agents
-    would receive the SAME nonzero dx/dy regardless of their own position —
-    exactly what this test forbids."""
+    a sector histogram summing to 1.0 with a non-zero bin); vbs_1, far away
+    with nothing nearby, must NOT (presence=0, all-zero sectors). If a future
+    regression reintroduces a global mean, both agents would receive the SAME
+    non-zero directional signal regardless of their own position — exactly
+    what this test forbids."""
     env, manager, sim_adapter = make_env(num_vbs=2, coverage_radius=5.0, sensing_radius_multiplier=2.0)
     env.reset(seed=0)
     vbs0, vbs1 = manager.vbs_registry[0], manager.vbs_registry[1]
@@ -230,13 +242,52 @@ def test_local_sensing_nonzero_and_agent_specific_with_asymmetric_ground_truth()
     env.last_coverage_matrix = np.zeros((len(env.agents), sim_adapter.num_users), dtype=bool)
 
     obs, _ = env._compute_observations_and_masks()
-    dx0, dy0, presence0 = _extract_local_signal(obs["vbs_0"], env.n_vbs)
-    dx1, dy1, presence1 = _extract_local_signal(obs["vbs_1"], env.n_vbs)
+    sectors0, presence0 = _extract_local_signal(obs["vbs_0"], env.n_vbs)
+    sectors1, presence1 = _extract_local_signal(obs["vbs_1"], env.n_vbs)
 
     assert presence0 == 1.0, "vbs_0 has an uncovered user well within its sensing radius"
+    assert sectors0.sum() == pytest.approx(1.0), "detected users must distribute mass 1.0 across sectors"
+    assert np.any(sectors0 > 0.0)
     assert presence1 == 0.0, "vbs_1 has nothing within its sensing radius"
-    assert (dx0, dy0) != (dx1, dy1), (
-        "vbs_0 and vbs_1 received identical dx/dy — this is the global-centroid "
+    assert np.all(sectors1 == 0.0)
+    assert not np.allclose(sectors0, sectors1), (
+        "vbs_0 and vbs_1 received identical sector histograms — this is the global-centroid "
         "mode-collapse bug: a single shared mean broadcast into every agent's obs"
     )
-    assert dx1 == 0.0 and dy1 == 0.0
+
+
+def test_local_sensing_symmetric_clusters_produce_two_peaks_not_a_dead_zone():
+    """THE Task 3 dead-zone regression: an agent sitting exactly between two
+    symmetric clusters of uncovered users previously saw the vector-mean cue
+    cancel to (dx=0, dy=0) — falsely signalling "target directly underneath
+    me". The sector histogram must instead show TWO distinct, opposite-sector
+    peaks (and presence=1), never the degenerate all-zero/nothing-here signal
+    that a cancelled mean produced."""
+    env, manager, sim_adapter = make_env(num_vbs=1, coverage_radius=5.0, sensing_radius_multiplier=2.0)
+    env.reset(seed=0)
+    vbs0 = manager.vbs_registry[0]
+    env._apply_actions({"vbs_0": 0})
+    x0, y0 = env._calculate_world_coords(vbs0, True)
+
+    # Two equal, symmetric uncovered clusters: due east and due west of the agent.
+    d = 3.0  # well within sensing radius (5.0 * 2.0)
+    sim_adapter.user_coords[:] = [x0, y0]  # placeholder, overwritten below
+    sim_adapter.user_coords[0::2] = [x0 + d, y0]  # east cluster
+    sim_adapter.user_coords[1::2] = [x0 - d, y0]  # west cluster
+    env.last_coverage_matrix = np.zeros((len(env.agents), sim_adapter.num_users), dtype=bool)
+
+    obs, _ = env._compute_observations_and_masks()
+    sectors, presence = _extract_local_signal(obs["vbs_0"], env.n_vbs)
+
+    assert presence == 1.0, "two symmetric clusters are firmly within sensing range"
+    nonzero = np.nonzero(sectors)[0]
+    assert len(nonzero) == 2, (
+        f"expected exactly two sector peaks from symmetric clusters, got {len(nonzero)} — "
+        "a single mean-based cue collapsing them (the dead-zone bug) would yield none"
+    )
+    # The two peaks must sit in OPPOSITE sectors (bin indices differ by n_bins/2)
+    # and split the mass evenly — distinct, non-degenerate directional evidence.
+    assert abs(int(nonzero[0]) - int(nonzero[1])) == env.NUM_LOCAL_SECTOR_BINS // 2
+    for idx in nonzero:
+        assert sectors[idx] == pytest.approx(0.5)
+    assert sectors.sum() == pytest.approx(1.0)

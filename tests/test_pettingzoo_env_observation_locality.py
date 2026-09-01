@@ -13,13 +13,18 @@ truth broadcast identically into every agent:
 
 These tests pin down the fixed contract:
   - branch_occupancy is gone from the VBS observation (dim count reflects
-    this: 13 + n_vbs for VBS, 16 + n_fbs for FBS).
-  - the uncovered-user gradient cue (dx, dy, presence) is bounded by each
-    agent's own sensing_radius (scaled off its own coverage_radius) and is
-    genuinely per-agent: two agents far apart with different local
-    uncovered-user distributions must see different dx/dy/presence values.
-  - presence=0 with dx=dy=0 when nothing is within sensing range, distinct
-    from an in-range detection.
+    this: 10 fixed + 8 sector bins + 1 presence + n_vbs for VBS, and
+    13 fixed + 8 sector bins + 1 presence + n_fbs for FBS).
+  - the uncovered-user directional cue (8 sector fractions + presence) is
+    bounded by each agent's own sensing_radius (scaled off its own
+    coverage_radius) and is genuinely per-agent: two agents far apart with
+    different local uncovered-user distributions must see different sector
+    histograms / presence values.
+  - presence=0 with all-zero sectors when nothing is within sensing range,
+    distinct from an in-range detection.
+  - the Task 3 dead-zone contract: symmetric clusters of uncovered users
+    around an agent produce two OPPOSITE sector peaks, never the cancelled
+    zero cue the old vector-mean produced.
 """
 import os
 import numpy as np
@@ -62,10 +67,20 @@ def make_env(num_vbs=2, sensing_radius_multiplier=2.5, coverage_radius=15.0):
     return env, manager, sim_adapter
 
 
+def _extract_local_signal(obs_row, n_identities):
+    """Obs layout tail (both agent types): [local_sector_fracs(8),
+    local_uncovered_presence(1), identity_hot(n)] — see observation_space()'s
+    documented feature order."""
+    n_bins = CoverageParallelEnv.NUM_LOCAL_SECTOR_BINS
+    presence = float(obs_row[-1 - n_identities])
+    sector_fracs = obs_row[-(1 + n_identities + n_bins): -1 - n_identities]
+    return sector_fracs, presence
+
+
 def test_vbs_observation_space_excludes_branch_occupancy():
     env, _, _ = make_env(num_vbs=2)
-    # 13 fixed dims (no branch_occupancy) + n_vbs identity one-hot
-    assert env.observation_space("vbs_0").shape == (13 + env.n_vbs,)
+    # 10 fixed dims (no branch_occupancy) + 8 sector bins + 1 presence + n_vbs identity
+    assert env.observation_space("vbs_0").shape == (10 + env.NUM_LOCAL_SECTOR_BINS + 1 + env.n_vbs,)
 
 
 def test_fbs_observation_space_gained_presence_bit():
@@ -74,7 +89,7 @@ def test_fbs_observation_space_gained_presence_bit():
     manager.register_fbs(fbs)
     manager.assign_identity_indices()
     env.n_fbs = len(manager.fbs_registry)
-    assert env.observation_space("fbs_99").shape == (16 + env.n_fbs,)
+    assert env.observation_space("fbs_99").shape == (13 + env.NUM_LOCAL_SECTOR_BINS + 1 + env.n_fbs,)
 
 
 def test_no_branch_occupancy_leak_into_vbs_obs():
@@ -84,14 +99,15 @@ def test_no_branch_occupancy_leak_into_vbs_obs():
     env, manager, _ = make_env(num_vbs=2)
     env._apply_actions({"vbs_0": 0, "vbs_1": 21})  # branch 1 slot 0, branch 2 slot 10
     obs, _ = env._compute_observations_and_masks()
-    assert obs["vbs_0"].shape == (13 + env.n_vbs,)
-    assert obs["vbs_1"].shape == (13 + env.n_vbs,)
+    expected = (10 + env.NUM_LOCAL_SECTOR_BINS + 1 + env.n_vbs,)
+    assert obs["vbs_0"].shape == expected
+    assert obs["vbs_1"].shape == expected
 
 
 def test_local_uncovered_signal_differs_by_agent_position():
     """Two VBS far apart, with an uncovered user near only one of them, must
-    see DIFFERENT dx/dy/presence — proof the feature is no longer a shared
-    global broadcast."""
+    see DIFFERENT sector histograms / presence — proof the feature is no
+    longer a shared global broadcast."""
     env, manager, sim_adapter = make_env(num_vbs=2, coverage_radius=5.0, sensing_radius_multiplier=2.0)
 
     vbs0 = manager.vbs_registry[0]
@@ -115,20 +131,21 @@ def test_local_uncovered_signal_differs_by_agent_position():
 
     obs, _ = env._compute_observations_and_masks()
 
-    vbs0_dx, vbs0_dy, vbs0_presence = obs["vbs_0"][-3 - env.n_vbs], obs["vbs_0"][-2 - env.n_vbs], obs["vbs_0"][-1 - env.n_vbs]
-    vbs1_dx, vbs1_dy, vbs1_presence = obs["vbs_1"][-3 - env.n_vbs], obs["vbs_1"][-2 - env.n_vbs], obs["vbs_1"][-1 - env.n_vbs]
+    vbs0_sectors, vbs0_presence = _extract_local_signal(obs["vbs_0"], env.n_vbs)
+    vbs1_sectors, vbs1_presence = _extract_local_signal(obs["vbs_1"], env.n_vbs)
 
     assert vbs0_presence == 1.0, "vbs_0 has an uncovered user within its sensing radius"
-    assert not (vbs0_dx == vbs1_dx and vbs0_dy == vbs1_dy and vbs0_presence == vbs1_presence), (
-        "dx/dy/presence must differ between spatially distinct agents; "
+    assert vbs1_presence == 0.0
+    assert not (np.allclose(vbs0_sectors, vbs1_sectors) and vbs0_presence == vbs1_presence), (
+        "sector histograms must differ between spatially distinct agents; "
         "identical values indicate a reintroduced global broadcast"
     )
 
 
-def test_no_detection_yields_zero_vector_and_zero_presence():
-    """If nothing is within sensing range, dx=dy=0 AND presence=0 (not the old
-    map-center fallback, which produced a nonzero dx/dy pointing at the map
-    center for every agent)."""
+def test_no_detection_yields_zero_sectors_and_zero_presence():
+    """If nothing is within sensing range, all sectors are 0 AND presence=0
+    (not the old map-center fallback, which produced a nonzero dx/dy pointing
+    at the map center for every agent)."""
     env, manager, sim_adapter = make_env(num_vbs=1, coverage_radius=1.0, sensing_radius_multiplier=1.0)
     vbs0 = manager.vbs_registry[0]
     env._apply_actions({"vbs_0": 0})
@@ -142,10 +159,39 @@ def test_no_detection_yields_zero_vector_and_zero_presence():
     env.last_coverage_matrix = np.zeros((len(env.agents), sim_adapter.num_users), dtype=bool)
 
     obs, _ = env._compute_observations_and_masks()
-    dx, dy, presence = obs["vbs_0"][-3 - env.n_vbs], obs["vbs_0"][-2 - env.n_vbs], obs["vbs_0"][-1 - env.n_vbs]
+    sectors, presence = _extract_local_signal(obs["vbs_0"], env.n_vbs)
     assert presence == 0.0
-    assert dx == 0.0
-    assert dy == 0.0
+    assert np.all(sectors == 0.0)
+
+
+def test_symmetric_uncovered_clusters_do_not_cancel_local_signal():
+    """THE Task 3 dead-zone regression, at the full observation level: an
+    agent placed exactly between two symmetric uncovered clusters previously
+    received the cancelled vector-mean cue (dx=0, dy=0) — indistinguishable
+    from "target directly underneath me". The sector histogram must show two
+    opposite-sector peaks with presence=1 instead."""
+    env, manager, sim_adapter = make_env(num_vbs=1, coverage_radius=5.0, sensing_radius_multiplier=2.0)
+    vbs0 = manager.vbs_registry[0]
+    env._apply_actions({"vbs_0": 0})
+    x0, y0 = env._calculate_world_coords(vbs0, True)
+
+    d = 3.0  # well within sensing radius (5.0 * 2.0)
+    sim_adapter.user_coords[:] = [x0, y0]
+    sim_adapter.user_coords[0::2] = [x0 + d, y0]  # east cluster
+    sim_adapter.user_coords[1::2] = [x0 - d, y0]  # west cluster
+    env.last_coverage_matrix = np.zeros((len(env.agents), sim_adapter.num_users), dtype=bool)
+
+    obs, _ = env._compute_observations_and_masks()
+    sectors, presence = _extract_local_signal(obs["vbs_0"], env.n_vbs)
+
+    assert presence == 1.0, "symmetric clusters are within sensing range — must not read as 'nothing detected'"
+    nonzero = np.nonzero(sectors)[0]
+    assert len(nonzero) == 2, (
+        f"expected two opposite sector peaks from the symmetric clusters, got {len(nonzero)} — "
+        "a mean-based cue would cancel them to the dead-zone zero signal"
+    )
+    assert abs(int(nonzero[0]) - int(nonzero[1])) == env.NUM_LOCAL_SECTOR_BINS // 2
+    assert sectors.sum() == pytest.approx(1.0)
 
 
 def test_global_extra_dim_unaffected_by_locality_fix():

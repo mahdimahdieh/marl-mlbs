@@ -35,28 +35,36 @@ class DiscreteActor(nn.Module):
 
 
 class CentralizedCritic(nn.Module):
-    """Training-time only. Deep-Sets pooling → permutation- and n_agents-invariant V(s)."""
+    """Training-time only. Deep-Sets pooling → permutation- and n_agents-invariant V(s).
 
-    # BUG LEDGER — FIXED (baseline/reward-stream granularity mismatch, Option A):
-    # vbs_head/fbs_head used to consume ONLY the pooled, type-level trunk output `h`
-    # — i.e. exactly one value per type per step, trained against the MEAN reward
-    # across all agents of that type. That single type-mean value was then reused,
-    # unmodified, as the GAE baseline for EACH individual agent's own distinct
-    # marginal-contribution reward trajectory — a systematic bias whenever agents
-    # of the same type diverge in behavior, which the reward design explicitly
-    # encourages. Fixed by making vbs_head/fbs_head agent-conditioned: each head
-    # now consumes the concatenation of (a) that agent's own per-agent encoded
-    # features `v_i`/`f_i` (computed by vbs_encoder/fbs_encoder BEFORE pooling —
-    # this already contains the agent's identity_hot feature carried over from its
-    # local observation, satisfying the "per-agent identity embedding" requirement
-    # without a separate embedding table) and (b) the shared team-level context `h`
-    # (so the value estimate remains centralized/joint-state-conditioned, not a
-    # decentralized per-agent critic). team_head is UNCHANGED — still a single
-    # team-level value computed from the pooled `h` only.
+    FIXED (Task 4 — relational / topology-aware trunk): the old trunk pooled the
+    VBS and FBS encodings with two INDEPENDENT symmetric (mean, max) Deep-Sets
+    aggregations. That destroyed the tether relation between each FBS and its
+    host VBS — the pooled FBS feature was a bag of FBS encodings with no memory
+    of which VBS each one orbits. The trunk now cross-conditions every FBS's
+    encoding on its own host VBS's encoding BEFORE pooling: when
+    fbs_host_vbs_indices is supplied, each FBS encoding f_i is concatenated with
+    its host VBS encoding v_{host(i)} and passed through fbs_relational_net.
+    Because the concat happens per-pair and pooling is still mean/max over the
+    agent sets, permutation invariance across disjoint (VBS, FBS-group) pairs is
+    preserved while intra-pair relational context is retained.
+
+    The per-agent value heads (vbs_head/fbs_head) are unchanged in contract:
+    each consumes its own per-agent encoded features + the shared team-level
+    context `h`, so the {"team", "vbs", "fbs"} output dict HeterogeneousPPOManager
+    expects is preserved.
+    """
     def __init__(self, vbs_local_dim, fbs_local_dim, global_extra_dim, hidden=128):
         super().__init__()
         self.vbs_encoder = nn.Sequential(layer_init(nn.Linear(vbs_local_dim, hidden)), nn.Tanh())
         self.fbs_encoder = nn.Sequential(layer_init(nn.Linear(fbs_local_dim, hidden)), nn.Tanh())
+        # Relational net: (fbs encoding ∥ host-vbs encoding) -> refined FBS encoding.
+        # Used only when fbs_host_vbs_indices is provided (see forward). Kept
+        # hidden→hidden so the pooled/head dimensions are identical whether or not
+        # the relational context is enabled.
+        self.fbs_relational_net = nn.Sequential(
+            layer_init(nn.Linear(hidden * 2, hidden)), nn.Tanh(),
+        )
         self.trunk = nn.Sequential(
             layer_init(nn.Linear(hidden * 4 + global_extra_dim, 128)), nn.Tanh(),
             layer_init(nn.Linear(128, 64)), nn.Tanh(),
@@ -69,10 +77,22 @@ class CentralizedCritic(nn.Module):
         self.vbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
         self.fbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
 
-    def forward(self, vbs_feats, fbs_feats, global_extra):
+    def forward(self, vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=None):
         v = self.vbs_encoder(vbs_feats)  # (B, n_vbs, hidden) — per-agent, pre-pooling
-        v_pool = torch.cat([v.mean(dim=1), v.max(dim=1).values], dim=-1)
         f = self.fbs_encoder(fbs_feats)  # (B, n_fbs, hidden) — per-agent, pre-pooling
+
+        if fbs_host_vbs_indices is not None:
+            # Relational cross-conditioning: each FBS encoding gets concatenated
+            # with ITS OWN host VBS encoding (v[:, host(i)]), then refined. This
+            # restores the tether relation the old bag-of-FBS pooling erased.
+            host_idx = torch.as_tensor(
+                fbs_host_vbs_indices, dtype=torch.long, device=v.device
+            )  # (n_fbs,)
+            host_v = v[:, host_idx]                 # (B, n_fbs, hidden)
+            f = torch.cat([f, host_v], dim=-1)      # (B, n_fbs, 2*hidden)
+            f = self.fbs_relational_net(f)          # (B, n_fbs, hidden)
+
+        v_pool = torch.cat([v.mean(dim=1), v.max(dim=1).values], dim=-1)
         f_pool = torch.cat([f.mean(dim=1), f.max(dim=1).values], dim=-1)
         h = self.trunk(torch.cat([v_pool, f_pool, global_extra], dim=-1))  # (B, 64), team-level context
 
@@ -110,7 +130,7 @@ class HeterogeneousPPOManager:
             action, log_prob, _ = net.get_action(obs.to(self.device), action_mask=action_mask)
         return action.cpu().item(), log_prob.cpu().item()
 
-    def get_value(self, vbs_feats, fbs_feats, global_extra):
+    def get_value(self, vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=None):
         """Returns {"team": float, "vbs": List[float], "fbs": List[float]}.
 
         team is still a single scalar (team_head is unchanged). vbs/fbs are now
@@ -118,10 +138,21 @@ class HeterogeneousPPOManager:
         order as the vbs_feats/fbs_feats rows passed in (i.e. the order produced
         by env.get_global_state()) — callers must preserve that ordering when
         matching these values back to agent_ids.
+
+        fbs_host_vbs_indices (Task 4) is the relational topology cue from
+        env.get_fbs_host_vbs_indices(): for each FBS row, the row index of its
+        host VBS in vbs_feats. Passing it enables the critic's host-paired
+        relational trunk; the SAME cue must be supplied to update_critic so the
+        critic is trained on the exact forward path used at rollout time
+        (train/serve consistency).
         """
         self.critic.eval()
         with torch.no_grad():
-            out = self.critic(vbs_feats.to(self.device), fbs_feats.to(self.device), global_extra.to(self.device))
+            out = self.critic(
+                vbs_feats.to(self.device), fbs_feats.to(self.device),
+                global_extra.to(self.device),
+                fbs_host_vbs_indices=fbs_host_vbs_indices,
+            )
             return {
                 "team": out["team"].cpu().item(),
                 "vbs": out["vbs"].squeeze(0).cpu().tolist(),
@@ -196,6 +227,13 @@ class HeterogeneousPPOManager:
         b_returns = {k: torch.tensor(v[0], dtype=torch.float32, device=self.device) for k, v in heads.items()}
         b_values = {k: torch.tensor(v[1], dtype=torch.float32, device=self.device) for k, v in heads.items()}
 
+        # Task 4: train the critic on the SAME host-paired relational forward
+        # path used at rollout time (main.py stores the cue in
+        # joint_buffer["fbs_host_vbs_indices"] once per episode — the VBS/FBS
+        # tether topology is fixed for the whole episode). Optional: without it
+        # the trunk falls back to the symmetric bag-of-FBS pooling.
+        host_indices = joint_batch.get("fbs_host_vbs_indices")
+
         dataset_size = b_returns["team"].shape[0]
         indices = torch.arange(dataset_size, device=self.device)
 
@@ -204,7 +242,10 @@ class HeterogeneousPPOManager:
             indices = indices[perm]
             for start in range(0, dataset_size, batch_size):
                 mb_idx = indices[start:start + batch_size]
-                new_out = self.critic(b_vbs[mb_idx], b_fbs[mb_idx], b_extra[mb_idx])
+                new_out = self.critic(
+                    b_vbs[mb_idx], b_fbs[mb_idx], b_extra[mb_idx],
+                    fbs_host_vbs_indices=host_indices,
+                )
 
                 loss = 0.0
                 for k in ("team", "vbs", "fbs"):

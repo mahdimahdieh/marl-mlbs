@@ -66,6 +66,9 @@ def bootstrap_environment(config_path: str, graph_path: str):
         # for these parameters and falls back to hardcoded defaults on every run.
         "center_node_id": config.get("graph_settings", {}).get("center_node_id", 0),
         "max_slot_per_branch": config.get("graph_settings", {}).get("max_slots_per_branch", 10),
+        # FIXED (Task 5): overlap penalty is a STATIC hyperparameter forwarded to
+        # the env (no more runtime per-episode warmup ramp inside step()).
+        "overlap_penalty_weight": config["hyperparameters"].get("overlap_penalty_weight", 0.20),
     }
 
     return env_config, config["hyperparameters"], config
@@ -225,6 +228,14 @@ def main():
         vbs_agent_order = [a for a in env.agents if "vbs" in a]
         fbs_agent_order = [a for a in env.agents if "fbs" in a]
 
+        # FIXED (Task 4): relational topology cue for the CentralizedCritic. The
+        # old symmetric mean/max Deep-Sets pooling over vbs_feats/fbs_feats destroyed
+        # which FBS is tethered to which host VBS. This maps every FBS row in
+        # get_global_state()'s fbs_feats to its host VBS's row index in vbs_feats
+        # (both stacked in _last_obs key order), so the critic can condition each
+        # FBS's encoding on its own host's encoding before pooling.
+        fbs_host_vbs_indices = env.get_fbs_host_vbs_indices()
+
         # Isolated Buffers to prevent weight contamination
         buffers = {
             "vbs": {agent: {"obs": [], "actions": [], "logprobs": [], "rewards": [], "masks": [], "values": []} for
@@ -244,6 +255,7 @@ def main():
             "global_extra": [],
             "team_values": [],
             "team_rewards": [],
+            "fbs_host_vbs_indices": fbs_host_vbs_indices,
         }
         terminations: Dict[str, bool] = {}
         truncations: Dict[str, bool] = {}
@@ -294,6 +306,7 @@ def main():
                 torch.tensor(vbs_feats, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(fbs_feats, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(global_extra, dtype=torch.float32).unsqueeze(0),
+                fbs_host_vbs_indices=fbs_host_vbs_indices,
             )
             joint_buffer["vbs_feats"].append(vbs_feats)
             joint_buffer["fbs_feats"].append(fbs_feats)
@@ -350,6 +363,7 @@ def main():
                 torch.tensor(f_vbs, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(f_fbs, dtype=torch.float32).unsqueeze(0),
                 torch.tensor(f_extra, dtype=torch.float32).unsqueeze(0),
+                fbs_host_vbs_indices=fbs_host_vbs_indices,
             )
         else:
             bootstrap_value = {
