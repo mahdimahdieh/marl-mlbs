@@ -2,7 +2,7 @@
     "env_settings": {
         "max_cycles": 100,
         "num_users": 1000,
-        "termination_goal": 0.80
+        "termination_goal": 0.99
     },
     "graph_settings": {
         "center_node_id": 0,
@@ -41,35 +41,35 @@
             "host_vbs_id": 0,
             "capacity": 20,
             "coverage_radius": 25.0,
-            "maximum_distance": 18.0
+            "maximum_distance": 30.0
         },
         {
             "id": 6,
             "host_vbs_id": 1,
             "capacity": 20,
             "coverage_radius": 25.0,
-            "maximum_distance": 18.0
+            "maximum_distance": 30.0
         },
         {
             "id": 7,
             "host_vbs_id": 2,
             "capacity": 20,
             "coverage_radius": 25.0,
-            "maximum_distance": 18.0
+            "maximum_distance": 30.0
         },
         {
             "id": 8,
             "host_vbs_id": 3,
             "capacity": 20,
             "coverage_radius": 25.0,
-            "maximum_distance": 18.0
+            "maximum_distance": 30.0
         },
                 {
             "id": 9,
             "host_vbs_id": 4,
             "capacity": 20,
             "coverage_radius": 25.0,
-            "maximum_distance": 18.0
+            "maximum_distance": 30.0
         }
     ],
     "hyperparameters": {
