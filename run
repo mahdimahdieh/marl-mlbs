@@ -1,0 +1,1 @@
+python inference.py --model-dir ./models/20260823-185715/
