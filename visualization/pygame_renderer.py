@@ -58,7 +58,7 @@ class PygameRenderer:
             _, px_y = self._to_px(0, i)
             pygame.draw.line(self.screen, self.colors["grid"], (0, px_y), (self.window_size, px_y))
 
-        # 2. Draw Graph Topology (FIXED: Pull properties directly out of native NetworkX object)
+        # 2. Draw Graph Topology (read directly from the native NetworkX object)
         graph = env.graph_engine.graph
         nodes = [{"id": n_id, **data} for n_id, data in graph.nodes(data=True)]
         links = [{"source": u, "target": v} for u, v in graph.edges()]

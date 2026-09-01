@@ -13,7 +13,6 @@ class NetworkXRoadEngine:
         with open(filepath, 'r') as f:
             data = json.load(f)
 
-        # Instantly reconstructs the topology, nodes, edges, and all attributes
         self.graph = nx.node_link_graph(data, edges="links")
 
     def save_to_json(self, filepath: str):
@@ -50,7 +49,6 @@ class NetworkXRoadEngine:
             raise NotImplementedError(f"Edge type {edge_data['type']} not implemented")
 
     def get_action_mask(self, current_branch_id: int) -> np.ndarray:
-        # Absolute (branch, slot) actions can't overshoot (see
-        # _decode_vbs_action) — no restriction possible today.
-        # STEP 1's slot count is read by the caller, not here.
-        return np.ones(current_branch_id, dtype=np.int8)  # caller resizes; see call site note below
+        # Absolute (branch, slot) actions can't overshoot — no restriction
+        # possible today; the caller resizes to the action-space width.
+        return np.ones(current_branch_id, dtype=np.int8)

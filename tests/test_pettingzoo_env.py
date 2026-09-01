@@ -1,34 +1,10 @@
 """
-Canonical CoverageParallelEnv regression suite — the structural regression
-gate for the bugs fixed in Tasks 1-3:
-
-  Task 1 (VBS action semantics): action_space/_apply_actions used to be a
-  relative accumulator (increment/decrement current_slot_index depending on
-  whether the chosen action matched current_branch_id). Fixed to an absolute,
-  factored (branch, slot) selection.
-
-  Task 2 (observation locality): uncovered_centroid used to be a single
-  global mean broadcast into every agent's dx/dy (a degenerate shared
-  attractor); branch_occupancy leaked global team state into the per-agent
-  actor observation. Fixed to a per-agent, sensing_radius-bounded directional
-  sector histogram + presence bit, with branch_occupancy removed.
-
-  Task 3 (local sensing dead-zone): the per-agent local cue was upgraded from
-  a single vector-mean (dx, dy) — which cancelled to (0, 0) when an agent sat
-  between symmetric clusters of uncovered users — to an 8-sector directional
-  histogram of locally detected uncovered users (fractions per 45° sector,
-  summing to 1.0 iff something is detected) plus a presence bit. The
-  observation_space() widths below pin the new schema:
-      VBS: 10 fixed + 8 sector bins + 1 presence  + n_vbs identity
-      FBS: 13 fixed + 8 sector bins + 1 presence  + n_fbs identity
-
-  Task 3 (critic granularity): out of scope for this file — see
-  tests/test_critic_agent_granularity.py.
-
-This file specifically checks that the env's DECLARED spaces
-(observation_space()/action_space()) match what it ACTUALLY produces at
-runtime — the exact kind of silent shape drift that would otherwise only
-surface as a crash deep inside main.py/inference.py's PPO forward pass.
+Canonical CoverageParallelEnv regression suite: checks that DECLARED spaces
+(observation_space()/action_space()) match runtime output, that VBS actions
+are absolute (branch, slot) selections, and that the per-agent local sector
+sensing (Task 2/3) is bounded, agent-specific and free of the symmetric-
+cluster dead-zone. Critic granularity is covered by
+tests/test_critic_agent_granularity.py.
 """
 import os
 import numpy as np
@@ -87,9 +63,8 @@ def test_vbs_action_space_matches_actual_mask_shape():
 
     actual_mask = infos_dict["vbs_0"]["action_mask"]
     assert actual_mask.shape == (declared_n,), (
-        "action_space().n has drifted from the actual action_mask width returned "
-        "by _compute_observations_and_masks — this is exactly the kind of drift "
-        "that crashes main.py/inference.py's PPO forward pass silently."
+        "action_space().n has drifted from the actual action_mask width — "
+        "this silently crashes main.py/inference.py's PPO forward pass."
     )
 
 
@@ -124,10 +99,8 @@ def test_fbs_observation_space_matches_actual_obs_shape():
 
 
 def test_global_state_feature_widths_match_declared_obs_dims():
-    """get_global_state()'s stacked rows must have the same per-agent width as
-    observation_space() declares — this is the exact field that silently
-    drifted (the "15 + n" -> "13 + n" / "16 + n" stale fallback bug) during
-    Task 2 and was caught only by manual review, not a test."""
+    """get_global_state()'s stacked rows must match observation_space() widths
+    (guards against silent per-agent feature-width drift)."""
     env, _, _ = make_env(num_vbs=2, num_fbs=1)
     env.reset(seed=0)
     vbs_feats, fbs_feats, global_extra = env.get_global_state()
@@ -142,11 +115,9 @@ def test_global_state_feature_widths_match_declared_obs_dims():
 # --------------------------------------------------------------------------- #
 
 def test_vbs_absolute_action_lands_exactly_regardless_of_prior_state():
-    """The original bug: a chosen action only advanced current_slot_index if it
-    matched current_branch_id, else it retreated by one slot -- multi-step
-    drift, with no absorbing target state. Post-fix, EVERY single action call
-    must land EXACTLY on its decoded (branch, slot) target in one step, with
-    zero dependency on whatever state the agent was previously in."""
+    """Every single action call must land EXACTLY on its decoded (branch, slot)
+    target in one step, with zero dependency on prior state (the old relative
+    accumulator drifted instead)."""
     env, manager, _ = make_env(num_vbs=1)
     env.reset(seed=0)
     vbs = manager.vbs_registry[0]
@@ -172,9 +143,8 @@ def test_vbs_absolute_action_lands_exactly_regardless_of_prior_state():
 
 
 def test_vbs_repeated_identical_action_is_idempotent():
-    """A structural signature check for the old bug: repeatedly issuing the
-    SAME action must always land on the SAME state (never oscillate), since
-    the decode is now a pure function of the action alone."""
+    """Repeatedly issuing the SAME action must always land on the SAME state —
+    the decode is a pure function of the action alone."""
     env, manager, _ = make_env(num_vbs=1)
     env.reset(seed=0)
     vbs = manager.vbs_registry[0]
@@ -190,8 +160,7 @@ def test_vbs_repeated_identical_action_is_idempotent():
 
 def _extract_local_signal(obs_row, n_identities):
     """Obs layout tail (both agent types): [local_sector_fracs(8),
-    local_uncovered_presence(1), identity_hot(n)] — see observation_space()'s
-    documented feature order."""
+    local_uncovered_presence(1), identity_hot(n)]."""
     n_bins = CoverageParallelEnv.NUM_LOCAL_SECTOR_BINS
     presence = float(obs_row[-1 - n_identities])
     sector_fracs = obs_row[-(1 + n_identities + n_bins): -1 - n_identities]
@@ -220,13 +189,8 @@ def test_local_sensing_returns_zero_sectors_and_zero_presence_when_nothing_in_ra
 
 
 def test_local_sensing_nonzero_and_agent_specific_with_asymmetric_ground_truth():
-    """Direct regression test for the global-centroid mode-collapse bug: place
-    a single uncovered user near vbs_0 ONLY. vbs_0 must detect it (presence=1,
-    a sector histogram summing to 1.0 with a non-zero bin); vbs_1, far away
-    with nothing nearby, must NOT (presence=0, all-zero sectors). If a future
-    regression reintroduces a global mean, both agents would receive the SAME
-    non-zero directional signal regardless of their own position — exactly
-    what this test forbids."""
+    """Regression for the global-centroid mode-collapse bug: a single uncovered
+    user near vbs_0 only — vbs_0 must detect it, far-away vbs_1 must not."""
     env, manager, sim_adapter = make_env(num_vbs=2, coverage_radius=5.0, sensing_radius_multiplier=2.0)
     env.reset(seed=0)
     vbs0, vbs1 = manager.vbs_registry[0], manager.vbs_registry[1]
@@ -251,18 +215,15 @@ def test_local_sensing_nonzero_and_agent_specific_with_asymmetric_ground_truth()
     assert presence1 == 0.0, "vbs_1 has nothing within its sensing radius"
     assert np.all(sectors1 == 0.0)
     assert not np.allclose(sectors0, sectors1), (
-        "vbs_0 and vbs_1 received identical sector histograms — this is the global-centroid "
-        "mode-collapse bug: a single shared mean broadcast into every agent's obs"
+        "vbs_0 and vbs_1 received identical sector histograms — "
+        "a reintroduced global broadcast"
     )
 
 
 def test_local_sensing_symmetric_clusters_produce_two_peaks_not_a_dead_zone():
-    """THE Task 3 dead-zone regression: an agent sitting exactly between two
-    symmetric clusters of uncovered users previously saw the vector-mean cue
-    cancel to (dx=0, dy=0) — falsely signalling "target directly underneath
-    me". The sector histogram must instead show TWO distinct, opposite-sector
-    peaks (and presence=1), never the degenerate all-zero/nothing-here signal
-    that a cancelled mean produced."""
+    """Task 3 dead-zone regression: an agent exactly between two symmetric
+    uncovered clusters must see TWO opposite sector peaks (the old vector-mean
+    cue cancelled to (dx=0, dy=0), falsely signalling 'target underneath me')."""
     env, manager, sim_adapter = make_env(num_vbs=1, coverage_radius=5.0, sensing_radius_multiplier=2.0)
     env.reset(seed=0)
     vbs0 = manager.vbs_registry[0]
@@ -282,11 +243,9 @@ def test_local_sensing_symmetric_clusters_produce_two_peaks_not_a_dead_zone():
     assert presence == 1.0, "two symmetric clusters are firmly within sensing range"
     nonzero = np.nonzero(sectors)[0]
     assert len(nonzero) == 2, (
-        f"expected exactly two sector peaks from symmetric clusters, got {len(nonzero)} — "
-        "a single mean-based cue collapsing them (the dead-zone bug) would yield none"
+        f"expected exactly two sector peaks from symmetric clusters, got {len(nonzero)}"
     )
-    # The two peaks must sit in OPPOSITE sectors (bin indices differ by n_bins/2)
-    # and split the mass evenly — distinct, non-degenerate directional evidence.
+    # The peaks must sit in OPPOSITE sectors and split the mass evenly.
     assert abs(int(nonzero[0]) - int(nonzero[1])) == env.NUM_LOCAL_SECTOR_BINS // 2
     for idx in nonzero:
         assert sectors[idx] == pytest.approx(0.5)

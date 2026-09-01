@@ -1,29 +1,9 @@
 """
-Regression coverage for the baseline/reward-stream granularity fix spanning
-rl/agents/ppo_module.py (CentralizedCritic, Option A: agent-conditioned value
-heads) and main.py's training loop.
-
-BUG LEDGER context: vbs_values/fbs_values used to be ONE value per type per
-step, trained against the type-mean reward, then reused unmodified as the GAE
-baseline for EACH individual agent's own distinct reward trajectory. Fixed by
-making vbs_head/fbs_head output one value per agent per step, and by
-restructuring main.py's rollout/optimization loop so each agent's own value
-trajectory (buffers[type][agent_id]["values"]) is baselined against that same
-agent's own reward trajectory.
-
-These tests pin down:
-  - CentralizedCritic.forward returns per-agent vbs/fbs values (not a single
-    per-type scalar), while team_head remains a single scalar.
-  - two agents with different local features get different values (proof the
-    head is agent-conditioned, not a broadcast type-mean).
-  - HeterogeneousPPOManager.get_value returns per-agent lists of the correct
-    length.
-  - update_critic accepts per-agent (T, n_agents) return/value matrices and
-    runs without shape errors.
-  - main.py's rollout produces per-agent value trajectories at the same
-    length as that agent's own reward trajectory (the actual granularity
-    mismatch the task fixes), by running a couple of real, short episodes
-    through the true training loop machinery.
+Regression coverage for the critic's agent-conditioned value heads
+(rl/agents/ppo_module.py) and the Task-4 relational, topology-aware trunk:
+per-agent vbs/fbs values (not type-mean scalars), host-pairing sensitivity,
+permutation invariance across disjoint (VBS, FBS) pairs, and an end-to-end
+run of main.py's real training loop.
 """
 import os
 import sys
@@ -62,8 +42,7 @@ def test_critic_forward_shapes_are_per_agent():
 
 def test_critic_vbs_head_is_agent_conditioned_not_broadcast():
     """Two agents with DIFFERENT local features in the same step must get
-    DIFFERENT values. The old bug (type-mean broadcast) would have produced
-    identical values for every agent regardless of their own features."""
+    DIFFERENT values (the old type-mean broadcast produced identical ones)."""
     critic = CentralizedCritic(vbs_local_dim=13, fbs_local_dim=16, global_extra_dim=5)
     critic.eval()
 
@@ -99,8 +78,7 @@ def test_get_value_returns_per_agent_lists():
 
 def test_update_critic_accepts_per_agent_return_matrices():
     """update_critic must train against (T, n_agents) vbs/fbs return & value
-    matrices without shape errors -- the direct fix for the granularity
-    mismatch (previously (T,) type-mean scalars)."""
+    matrices — and the same relational host-pairing cue get_value receives."""
     n_vbs, n_fbs, T = 3, 2, 10
     ppo = HeterogeneousPPOManager(
         vbs_obs_dim=13, fbs_obs_dim=16, vbs_action_dim=33, fbs_action_dim=17,
@@ -128,12 +106,8 @@ def test_update_critic_accepts_per_agent_return_matrices():
 # --- Task 4: relational / topology-aware critic trunk ----------------------- #
 
 def test_critic_relational_conditioning_uses_host_pairing():
-    """The whole point of the Task 4 trunk: IDENTICAL vbs/fbs feature sets but
-    a DIFFERENT FBS->host-VBS tether mapping must produce different outputs.
-    If the critic still pooled FBS encodings symmetrically (bag of FBS), the
-    host mapping would be invisible and both calls would return identical
-    values — exactly the relational information the old mean/max Deep-Sets
-    pooling destroyed."""
+    """Task 4: identical feature sets but a DIFFERENT FBS->host-VBS tether
+    mapping must produce different outputs — symmetric pooling would erase it."""
     torch.manual_seed(0)
     n_vbs, n_fbs, vbs_dim, fbs_dim, extra_dim = 2, 2, 13, 16, 5
     critic = CentralizedCritic(vbs_dim, fbs_dim, extra_dim)
@@ -158,10 +132,9 @@ def test_critic_relational_conditioning_uses_host_pairing():
 
 
 def test_critic_permutation_invariant_across_disjoint_pairs():
-    """Task 4 invariance contract: permuting whole (VBS, FBS) tether PAIRS must
-    leave the team value unchanged and permute the per-agent values along with
-    the rows. Only the intra-pair relational context may (must!) be retained —
-    the pair permutation here never breaks an FBS away from its host."""
+    """Task 4 invariance: permuting whole (VBS, FBS) tether PAIRS leaves the
+    team value unchanged and permutes per-agent values with the rows; the pair
+    permutation never breaks an FBS away from its host."""
     torch.manual_seed(1)
     n_vbs, n_fbs, vbs_dim, fbs_dim, extra_dim = 3, 3, 13, 16, 5
     critic = CentralizedCritic(vbs_dim, fbs_dim, extra_dim)
@@ -199,8 +172,7 @@ def test_critic_permutation_invariant_across_disjoint_pairs():
 
 def test_critic_permutation_invariant_within_shared_host_group():
     """Two FBS tethered to the SAME host form an unordered group: swapping
-    them (while keeping the host VBS rows fixed) must leave the team value AND
-    the per-agent values unchanged — the set of (host, FBS) pairs is identical."""
+    them (host VBS rows fixed) leaves every output unchanged."""
     torch.manual_seed(2)
     n_vbs, n_fbs, vbs_dim, fbs_dim, extra_dim = 2, 2, 13, 16, 5
     critic = CentralizedCritic(vbs_dim, fbs_dim, extra_dim)
@@ -255,11 +227,9 @@ def small_env_and_ppo():
 
 
 def test_rollout_produces_matching_granularity_value_and_reward_trajectories(small_env_and_ppo):
-    """Runs the real per-agent-value bookkeeping pattern from main.py's rollout
-    loop directly against a live env + PPO manager, and asserts each agent's
-    'values' trajectory ends up the same length as its own 'rewards'
-    trajectory -- the concrete manifestation of 'baseline and reward stream at
-    the same granularity' this task requires."""
+    """Runs main.py's per-agent-value bookkeeping pattern against a live env
+    and asserts each agent's 'values' trajectory matches its own 'rewards'
+    trajectory length (baseline and reward stream at the same granularity)."""
     env, ppo = small_env_and_ppo
     obs_dict, infos_dict = env.reset(seed=0)
 
@@ -302,20 +272,19 @@ def test_rollout_produces_matching_granularity_value_and_reward_trajectories(sma
                 f"values={len(data['values'])} rewards={len(data['rewards'])} steps={env.step_count}"
             )
 
-    # Distinct VBS agents must not be forced to share identical value trajectories
-    # (the old bug: both would get the exact same type-mean value every step).
+    # Distinct VBS agents must not share identical value AND reward
+    # trajectories (the old type-mean broadcast produced exactly that).
     vbs_ids = list(buffers["vbs"].keys())
     if len(vbs_ids) >= 2:
         assert buffers["vbs"][vbs_ids[0]]["values"] != buffers["vbs"][vbs_ids[1]]["values"] or \
                buffers["vbs"][vbs_ids[0]]["rewards"] != buffers["vbs"][vbs_ids[1]]["rewards"], \
-               "two distinct VBS agents produced identical value AND reward trajectories in this smoke test"
+               "two distinct VBS agents produced identical value AND reward trajectories"
 
 
 def test_full_training_step_end_to_end_via_main_module(monkeypatch, tmp_path):
     """Exercises the ACTUAL main.py training loop (one real episode) against a
-    tiny hand-built config, to catch any residual shape mismatch between the
-    per-agent critic output and compute_gae/update_actor/update_critic calls
-    that a narrower unit test might miss."""
+    tiny config, to catch residual shape mismatches between the per-agent
+    critic output and compute_gae/update_actor/update_critic calls."""
     graph_src = os.path.join(os.path.dirname(__file__), "..", "config", "graph_map.json")
     config = {
         "env_settings": {"max_cycles": 3, "num_users": 15, "termination_goal": 0.999},

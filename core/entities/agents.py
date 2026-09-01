@@ -11,9 +11,8 @@ class BaseStation:
     capacity: int
     coverage_radius: float
 
-    # RAW count from coverage_matrix.sum(axis=1). May double-count users covered
-    # by multiple stations simultaneously. Used for capacity headroom tracking and
-    # visualisation ONLY — never pass this to reward or termination logic.
+    # RAW count from coverage_matrix.sum(axis=1); double-counts overlapping
+    # users. Diagnostics/visualisation ONLY — never reward or termination.
     current_coverage_count: int = 0
 
     # injective slot, decoupled from home_branch_id's mod-3 collisions
@@ -24,11 +23,8 @@ class BaseStation:
         return self.current_coverage_count >= self.capacity
 
     def get_coverage_efficiency(self) -> float:
-        """
-        Per-station capacity saturation [0.0, 1.0]. Diagnostic only.
-        This is NOT the RL objective. A station can be "full" while the network
-        covers only a small fraction of the user population.
-        """
+        """Per-station capacity saturation [0.0, 1.0]. Diagnostic only — NOT
+        the RL objective (see AgentManager.get_capacity_utilization)."""
         if self.capacity > 0:
             return min(self.current_coverage_count, self.capacity) / self.capacity
         return 0.0
@@ -102,18 +98,9 @@ class AgentManager:
             fbs.reset_state()
 
     def get_capacity_utilization(self) -> float:
-        """
-        DIAGNOSTIC ONLY — this is NOT the RL objective.
-
-        Returns the fraction of total station capacity that is filled, including
-        double-counted users. This metric saturates to 1.0 immediately at step 1
-        whenever the number of users in range exceeds any station's capacity limit,
-        even if only a tiny fraction of total users are uniquely covered.
-
-        True Network Coverage Efficiency — the actual RL objective — is:
-            unique_users_covered (set-union) / total_users
-        This is maintained by CoverageParallelEnv as `env.last_true_coverage`.
-        """
+        """DIAGNOSTIC ONLY — fraction of total station capacity filled
+        (double-counts users). The actual RL objective is CoverageParallelEnv's
+        env.last_true_coverage: unique users covered / total users."""
         total_capacity = (
             sum(v.capacity for v in self.vbs_registry.values()) +
             sum(f.capacity for f in self.fbs_registry.values())
@@ -128,7 +115,8 @@ class AgentManager:
         return total_filled / total_capacity
 
     def get_total_efficiency(self) -> float:
-        # STRICT FIX: Sum the clamped efficiencies, not the raw counts,
+        """Clamped per-station efficiencies summed over total capacity — a
+        capacity-saturation diagnostic, not the RL objective."""
         total_capacity = (sum(v.capacity for v in self.vbs_registry.values()) +
                           sum(f.capacity for f in self.fbs_registry.values()))
 
@@ -148,10 +136,9 @@ class AgentManager:
             vbs.home_branch_id = (idx % num_branches) + 1  # branches are 1-indexed node ids
 
     def assign_identity_indices(self) -> None:
-        """Call once after all registration, before env.reset(). Injective per-type
-        slot index — structurally independent of home_branch_id's mod-N_BRANCHES
-        arithmetic — so a shared-weight policy can never see bit-identical inputs
-        for two physically distinct agents."""
+        """Call once after all registration, before env.reset(). Injective
+        per-type slot so a shared-weight policy never sees bit-identical
+        inputs for two physically distinct agents."""
         for idx, vbs in enumerate(sorted(self.vbs_registry.values(), key=lambda v: v.id)):
             vbs.identity_index = idx
         for idx, fbs in enumerate(sorted(self.fbs_registry.values(), key=lambda f: f.id)):

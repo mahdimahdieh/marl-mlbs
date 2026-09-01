@@ -12,10 +12,6 @@ class NetworkSimABC(ABC):
 
     @abstractmethod
     def compute_batched_coverage(self, agent_coords: np.ndarray, coverage_radii: np.ndarray) -> np.ndarray:
-        """
-        STRICT RL REQUIREMENT:
-        Takes an (N, 2) array of coordinates and an (N,) array of radii.
-        Returns an (N,) integer array of coverage counts.
-        NO FOR LOOPS. Concrete implementations must use vectorized spatial math.
-        """
+        """(N, 2) coords + (N,) radii in, (N,) coverage counts out —
+        vectorized, no Python loops."""
         pass

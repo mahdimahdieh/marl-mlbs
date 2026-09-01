@@ -37,7 +37,7 @@ def bootstrap_environment(config_path: str, graph_path: str):
         )
         manager.register_vbs(vbs)
     manager.assign_home_branches(
-        num_branches=3)  # hardcoded,  bind to config["graph_settings"] if branch count becomes configurable
+        num_branches=3)  # hardcoded, bind to config["graph_settings"] if branch count becomes configurable
     manager.assign_identity_indices()
 
     for f_cfg in config["fbs_agents"]:
@@ -61,13 +61,8 @@ def bootstrap_environment(config_path: str, graph_path: str):
         "sim_adapter": sim_adapter,
         "max_cycles": config["env_settings"]["max_cycles"],
         "termination_goal": config["env_settings"]["termination_goal"],
-        # FIXED: Forward graph topology settings from config to the env.
-        # Without this, CoverageParallelEnv ignores simulation_config.json entirely
-        # for these parameters and falls back to hardcoded defaults on every run.
         "center_node_id": config.get("graph_settings", {}).get("center_node_id", 0),
         "max_slot_per_branch": config.get("graph_settings", {}).get("max_slots_per_branch", 10),
-        # FIXED (Task 5): overlap penalty is a STATIC hyperparameter forwarded to
-        # the env (no more runtime per-episode warmup ramp inside step()).
         "overlap_penalty_weight": config["hyperparameters"].get("overlap_penalty_weight", 0.20),
     }
 
@@ -75,15 +70,8 @@ def bootstrap_environment(config_path: str, graph_path: str):
 
 
 def _broadcast_bootstrap(vals: List[float], n_agents: int) -> List[float]:
-    """Normalize a per-agent bootstrap-value list to exactly n_agents entries.
-
-    NOTE: get_global_state() no longer zero-pads on truncation — it keys off
-    _last_obs, populated pre-clear in step()'s Phase 6 (see
-    test_get_global_state_after_truncation_returns_real_features_not_zeros).
-    The only remaining zero-fallback case is pre-reset, before any episode
-    has run (see test_get_global_state_before_any_reset_uses_empty_fallback),
-    which this helper still guards defensively.
-    """
+    """Normalize a per-agent bootstrap-value list to exactly n_agents entries
+    (covers the pre-reset case where get_value returns no agent values)."""
     if len(vals) == n_agents:
         return vals
     if len(vals) == 0:
@@ -94,13 +82,9 @@ def _broadcast_bootstrap(vals: List[float], n_agents: int) -> List[float]:
 def compute_gae(rewards: List[float], values: List[float], next_value: float, gamma: float = 0.99, lam: float = 0.95):
     """Calculates Generalized Advantage Estimation for stable Critic targets.
 
-    `next_value` MUST be 0.0 only for a true terminal (absorbing) state. For a
-    time-limit truncation the trajectory is NOT actually over, and next_value
-    should be the critic's own V(s_T) estimate -- see the bootstrap_value
-    computation in the training loop below. Bootstrapping every rollout with
-    a hardcoded 0.0 regardless of termination vs. truncation was bug ledger
-    item #5: it systematically biases the value target toward zero for every
-    episode that hits max_cycles without solving the task.
+    next_value MUST be 0.0 only for a true terminal (absorbing) state; for a
+    time-limit truncation pass the critic's own V(s_T) estimate, otherwise
+    every max_cycles episode's value target is biased toward zero.
     """
     advantages = []
     last_gae_lam = 0
@@ -139,7 +123,7 @@ def main():
     parser.add_argument("--save-dir", type=str, default="models")
     parser.add_argument("--save-every", type=int, default=250)
     parser.add_argument("--log-every", type=int, default=10,
-                        help="Console print cadence. TensorBoard now logs EVERY episode (see bug ledger #3) regardless of this.")
+                        help="Console print cadence. TensorBoard logs EVERY episode.")
     parser.add_argument("--seed", type=int, default=42,
                         help="seed for full reproducibility / overfitting baseline.")
     parser.add_argument("--overfit", action="store_true",
@@ -154,10 +138,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Booting Training Loop on: {device.upper()}")
 
-    # FIXED: Derive ALL network I/O dimensions from the live env at startup.
-    # This makes main.py a passive consumer of env's ground truth — if any config
-    # change cascades through to CoverageParallelEnv (e.g., new branch makes VBS Discrete(4)),
-    # PPO receives the corrected dims automatically on the next run.
+    # Derive ALL network I/O dimensions from the live env at startup so config
+    # changes cascade automatically instead of crashing PPO's forward pass.
     vbs_agent_id = next(a for a in env.possible_agents if "vbs" in a)
     fbs_agent_id = next(a for a in env.possible_agents if "fbs" in a)
 
@@ -192,48 +174,25 @@ def main():
     save_dir = os.path.join(args.save_dir, data_time)
     os.makedirs(save_dir, exist_ok=True)
 
-    # BUG LEDGER #3 FIX: these used to be seeded with a single 0.0 and never
-    # appended to anywhere in the loop, so every "avg100" value ever printed
-    # or logged was sum([0.0]) / 1 == 0.0 for the entire run. They now start
-    # empty and are appended to unconditionally, every episode, below.
+    # Rolling windows, appended every episode below.
     reward_window = deque(maxlen=100)
     coverage_window = deque(maxlen=100)
-    solve_window = deque(maxlen=100)  # 1.0 if the episode reached the true-coverage goal, else 0.0
+    solve_window = deque(maxlen=100)  # 1.0 if the episode reached the true-coverage goal
 
     # 2. Training Loop
     for episode in range(1, args.episodes + 1):
         distribution_seed = args.seed if args.overfit else episode
         obs_dict, infos_dict = env.reset(seed=distribution_seed)
 
-        # BUG LEDGER — FIXED (baseline/reward-stream granularity mismatch):
-        # vbs_values/fbs_values used to be ONE value per type per step (from
-        # CentralizedCritic's old type-pooled heads), trained against the MEAN
-        # reward across agents of that type, then reused UNMODIFIED as the GAE
-        # baseline for EACH individual agent's own distinct reward trajectory
-        # (buffers[agent_type][agent_id]["rewards"]). Since the marginal-
-        # contribution reward is explicitly designed to differentiate agents by
-        # their individual counterfactual contribution, baselining every agent's
-        # distinct reward stream with the same type-mean value systematically
-        # biased the advantage estimate whenever agents within a type diverge in
-        # behavior — the expected, desired outcome of the reward design.
-        #
-        # FIX (Option A — agent-conditioned value heads, see CentralizedCritic):
-        # vbs_head/fbs_head now output one value PER AGENT per step. Each agent's
-        # own value trajectory is captured directly into buffers[type][agent_id]
-        # ["values"], at the same per-step granularity as its own "rewards" — no
-        # separate type-level joint_buffer arrays needed for vbs/fbs anymore.
-        # agent order is captured once, up front, because CoverageParallelEnv
-        # keeps self.agents (and therefore env.get_global_state()'s stacking
-        # order) fixed for the full episode until the final terminating step.
+        # Per-agent GAE bookkeeping: the critic's per-agent values (below) are
+        # captured at the same granularity as each agent's own rewards. Agent
+        # order is captured once because env.get_global_state()'s stacking
+        # order is fixed for the whole episode.
         vbs_agent_order = [a for a in env.agents if "vbs" in a]
         fbs_agent_order = [a for a in env.agents if "fbs" in a]
 
-        # FIXED (Task 4): relational topology cue for the CentralizedCritic. The
-        # old symmetric mean/max Deep-Sets pooling over vbs_feats/fbs_feats destroyed
-        # which FBS is tethered to which host VBS. This maps every FBS row in
-        # get_global_state()'s fbs_feats to its host VBS's row index in vbs_feats
-        # (both stacked in _last_obs key order), so the critic can condition each
-        # FBS's encoding on its own host's encoding before pooling.
+        # Task 4: maps every FBS row in get_global_state()'s fbs_feats to its
+        # host VBS's row index in vbs_feats (fixed for the whole episode).
         fbs_host_vbs_indices = env.get_fbs_host_vbs_indices()
 
         # Isolated Buffers to prevent weight contamination
@@ -246,9 +205,6 @@ def main():
         episode_reward = 0.0
 
         # --- ROLLOUT PHASE ---
-        # team_* stays scalar-per-step (team_head is unchanged); vbs/fbs returns
-        # and values are now assembled AFTER the rollout from buffers[type][*]["values"]/
-        # ["rewards"], at per-agent granularity (see BUG LEDGER above).
         joint_buffer = {
             "vbs_feats": [],
             "fbs_feats": [],
@@ -263,11 +219,9 @@ def main():
         while env.agents:
             actions = {}
 
-            # FIXED: FBS action-vs-observation causality gap — FBS chose its action
-            # from a VBS position one step stale (see BUG LEDGER). VBS agents are now
-            # processed FIRST so their committed action for this step is known before
-            # FBS's own get_action() call, letting FBS observe its host's NEXT
-            # position via env.preview_vbs_world_coords() (pure, no state mutation).
+            # VBS agents are processed FIRST so their committed action for this
+            # step is known before FBS's get_action() call, letting each FBS
+            # observe its host's NEXT position via env.preview_vbs_world_coords().
             for agent_id in env.agents:
                 if "vbs" not in agent_id:
                     continue
@@ -314,8 +268,7 @@ def main():
             joint_buffer["team_values"].append(step_values["team"])
 
             # Per-agent value, at the SAME granularity as the per-agent reward
-            # each agent will receive this same step (fix core: no more type-mean
-            # value standing in for an individual agent's baseline).
+            # each agent will receive this same step.
             for i, agent_id in enumerate(vbs_agent_order):
                 buffers["vbs"][agent_id]["values"].append(step_values["vbs"][i])
             for i, agent_id in enumerate(fbs_agent_order):
@@ -334,26 +287,13 @@ def main():
             infos_dict = next_infos_dict
 
         # --- OPTIMIZATION PHASE ---
-        # Compile global metrics
-        #
-        # CRITICAL: env.last_true_coverage is the unique-user set-union metric
-        # computed in CoverageParallelEnv.step() Phase 3:
-        #     any_covered_mask = np.any(coverage_matrix, axis=0)   # per-USER, not per-station
-        #     true_coverage = unique_users_covered / total_users
-        #
-        # agent_manager.get_total_efficiency() is a DIFFERENT metric — per-station
-        # capacity saturation (sum(min(count, capacity)) / sum(capacity)). It
-        # double-counts users seen by multiple overlapping stations and clamps
-        # each station's contribution at its own capacity, so it can read 100%
-        # while only a small fraction of the actual user population is covered.
-        # That is what was producing the 20%-covered-but-100%-reported symptom.
+        # env.last_true_coverage is the unique-user set-union metric (the RL
+        # objective); agent_manager.get_total_efficiency() is a different,
+        # capacity-saturation diagnostic that double-counts users.
         final_efficiency = env.last_true_coverage
 
-        # BUG LEDGER #5 FIX: distinguish a true terminal state from a
-        # time-limit truncation. compute_gae used to always bootstrap with
-        # next_value=0.0, which is only correct for the terminated case — a
-        # truncated episode is not actually over, so we bootstrap it with the
-        # critic's own value estimate at the final observed state instead.
+        # Distinguish a true terminal from a time-limit truncation: truncated
+        # episodes bootstrap with the critic's V(s_T), terminated with 0.0.
         episode_terminated = bool(terminations) and all(terminations.values())
         episode_truncated = bool(truncations) and all(truncations.values()) and not episode_terminated
 
@@ -371,23 +311,15 @@ def main():
                 "vbs": [0.0] * len(vbs_agent_order),
                 "fbs": [0.0] * len(fbs_agent_order),
             }
-        # See _broadcast_bootstrap's TODO(scope) docstring: normalizes whatever
-        # shape ppo.get_value()/env.get_global_state() produced back to exactly
-        # one bootstrap scalar per agent, defensively (does not fix the
-        # pre-existing get_global_state() zero-fallback quirk itself).
         bootstrap_vbs = _broadcast_bootstrap(bootstrap_value["vbs"], len(vbs_agent_order))
         bootstrap_fbs = _broadcast_bootstrap(bootstrap_value["fbs"], len(fbs_agent_order))
 
         batch_vbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
         batch_fbs = {"obs": [], "actions": [], "logprobs": [], "advantages": [], "masks": []}
 
-        # BUG LEDGER — FIXED: baseline (buffers[type][agent]["values"]) and reward
-        # stream (buffers[type][agent]["rewards"]) are now the SAME agent's own
-        # trajectory at the SAME per-step granularity — no more type-mean value
-        # standing in for an individual agent's distinct marginal-contribution
-        # reward. Also collects the per-agent (returns, values) needed for the
-        # critic update below, transposed into (T, n_agents) matrices aligned
-        # with vbs_agent_order/fbs_agent_order.
+        # GAE per agent, each baselined by its own value trajectory; the
+        # (returns, values) lists are transposed into (T, n_agents) matrices
+        # below for the critic update.
         vbs_returns_by_agent, vbs_values_by_agent = [], []
         for i, agent_id in enumerate(vbs_agent_order):
             data = buffers["vbs"][agent_id]
@@ -423,12 +355,9 @@ def main():
             ppo.update_actor(batch_fbs, "fbs", clip_coef=hp["clip_coef"], ent_coef=hp["ent_coef"],
                              ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
-        # Critic: team_head keeps its own scalar-per-step GAE pass, unchanged.
-        # vbs/fbs are transposed from (n_agents, T) to (T, n_agents) so each row
-        # lines up with the corresponding vbs_feats/fbs_feats row (one per
-        # environment step) that update_critic's forward pass consumes — see
-        # CentralizedCritic/update_critic BUG LEDGER for why this is now a
-        # per-agent-column target instead of a single type-mean column.
+        # Critic: team_head keeps its own scalar-per-step GAE pass; vbs/fbs
+        # returns and values are transposed from (n_agents, T) to (T, n_agents)
+        # so each row lines up with the corresponding per-step feats rows.
         _, team_returns = compute_gae(joint_buffer["team_rewards"], joint_buffer["team_values"],
                                       next_value=bootstrap_value["team"])
         vbs_returns = [list(row) for row in zip(*vbs_returns_by_agent)] if vbs_returns_by_agent else []
@@ -443,14 +372,12 @@ def main():
             "team_values": joint_buffer["team_values"], "team_returns": team_returns,
             "vbs_values": vbs_values, "vbs_returns": vbs_returns,
             "fbs_values": fbs_values, "fbs_returns": fbs_returns,
+            "fbs_host_vbs_indices": fbs_host_vbs_indices,
         }, vf_coef=hp["vf_coef"], ppo_epochs=hp["ppo_epochs"], batch_size=hp["batch_size"])
 
         # --- LOGGING PHASE ---
-        # Rolling windows are now updated EVERY episode (bug ledger #3), not
-        # just on the episodes we happen to print. TensorBoard also now
-        # receives a scalar dict every episode instead of every 10th — full
-        # resolution data for TB's own smoothing slider to work with. Console
-        # printing stays at --log-every to avoid flooding stdout.
+        # Windows and TensorBoard update EVERY episode; console printing stays
+        # at --log-every to avoid flooding stdout.
         reward_window.append(episode_reward)
         coverage_window.append(final_efficiency)
         solve_window.append(1.0 if episode_terminated else 0.0)
@@ -460,11 +387,9 @@ def main():
         roll_solve_rate = sum(solve_window) / len(solve_window)
 
         metrics = {
-            # Grouped by TensorBoard tag prefix so the UI folds them into sections.
             "Reward/Episode": episode_reward,
-            # Raw episode_reward is a sum over a variable-length rollout, so it's
-            # not comparable across episodes of different lengths (see bug ledger
-            # #6) — Per_Step gives a length-normalized view alongside it.
+            # Raw episode_reward sums over a variable-length rollout, so
+            # Per_Step gives a length-normalized view alongside it.
             "Reward/Per_Step": (episode_reward / env.step_count) if env.step_count else 0.0,
             "Reward/Rolling100": roll_reward_mean,
             "Coverage/Episode": final_efficiency,

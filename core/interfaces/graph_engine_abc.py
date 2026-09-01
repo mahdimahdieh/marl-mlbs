@@ -13,11 +13,8 @@ class GraphEngineABC(ABC):
 
     @abstractmethod
     def get_action_mask(self, current_branch_id: int) -> np.ndarray:
-        """
-        STRICT RL REQUIREMENT:
-        Must return a 1D numpy array of dtype=np.int8 representing valid discrete actions.
-        E.g., [1, 0, 1] means Action 0 and 2 are legal, Action 1 will be masked.
-        """
+        """Must return a 1D np.int8 array of valid discrete actions
+        (1 = legal, 0 = masked)."""
         pass
 
     @abstractmethod

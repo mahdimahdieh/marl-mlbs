@@ -1,13 +1,7 @@
 """
-Regression coverage for two fixes addressing post-convergence training
-oscillation (see BUG LEDGER in rl/envs/reward_normalizer.py and
-rl/envs/pettingzoo_env.py step() Phase 5):
-
-  1. RunningNorm: lifetime Welford variance collapsed toward the old 1e-6
-     floor once the policy converged, causing normalize() to blow up small
-     residual deviations into large reward spikes.
-  2. CoverageParallelEnv.step(): no terminal incentive to solve fast vs.
-     linger near the termination threshold collecting more shaped reward.
+Regression coverage for reward-signal stability: RunningNorm's std floor /
+decay window / clip bounds, and the terminal speed bonus (added exactly once
+on solve, zero when solved on the final step).
 """
 import os
 import pytest
@@ -51,7 +45,7 @@ def make_env(termination_goal, num_vbs=2, num_fbs=1, max_cycles=10, num_users=20
 def test_normalize_output_is_bounded_by_clip():
     norm = RunningNorm(clip=5.0)
     for _ in range(500):
-        norm.update(1.0)  # variance collapses toward 0, mirroring post-convergence coverage
+        norm.update(1.0)  # variance collapses, mirroring post-convergence coverage
     out = norm.normalize(1.5)
     assert abs(out) <= 5.0 + 1e-9
 
@@ -61,30 +55,26 @@ def test_min_std_floor_prevents_division_blowup():
     for _ in range(1000):
         norm.update(0.5)
     out = norm.normalize(0.5001)
-    # With a real std floor, a near-zero deviation cannot produce a huge
-    # output the way division by a ~1e-6 std used to.
     assert abs(out) < 1.0
 
 
 def test_running_norm_tracks_recent_window_not_full_lifetime():
-    """Old lifetime Welford weighted an episode-1 sample exactly as heavily
-    as an episode-3000 sample. The decayed estimator must re-track a shifted
-    regime instead of staying anchored near the stale mean."""
+    """The decayed estimator must re-track a shifted regime instead of staying
+    anchored near the stale lifetime mean."""
     norm = RunningNorm(decay=0.99)
     for _ in range(2000):
         norm.update(0.0)
     for _ in range(200):
         norm.update(10.0)
-    assert norm.mean > 2.0, "mean failed to track the new regime -- window is not actually decaying old samples"
+    assert norm.mean > 2.0, "mean failed to track the new regime -- window is not decaying"
 
 
 # --- Terminal speed bonus ---------------------------------------------------
 
 def test_terminal_bonus_added_exactly_once_on_solve():
-    """Same config/seed/actions, differing only in termination_goal so one
-    run solves immediately and the other never does. The Phase-4 shaped
-    reward components are otherwise identical (termination_goal doesn't
-    feed into them) -- the diff must equal exactly the speed bonus formula."""
+    """Same config/seed/actions, differing only in termination_goal so one run
+    solves immediately and the other never does — the reward diff must equal
+    exactly the speed bonus formula."""
     solved_env = make_env(termination_goal=0.0, max_cycles=10)   # terminates at step 1
     unsolved_env = make_env(termination_goal=1.1, max_cycles=10)  # unreachable -> never terminates
 
@@ -109,9 +99,8 @@ def test_terminal_bonus_added_exactly_once_on_solve():
 
 
 def test_terminal_bonus_is_zero_when_solved_on_the_final_step():
-    """Solving exactly on the last allowed step (step_count == max_cycles)
-    saves zero steps -> bonus must be exactly 0, i.e. no free reward just
-    for terminating vs. truncating."""
+    """Solving exactly on the last allowed step saves zero steps -> bonus is
+    exactly 0 (no free reward just for terminating vs. truncating)."""
     env = make_env(termination_goal=0.0, max_cycles=1)  # solves on step 1 == max_cycles
     env.reset(seed=0)
     actions = {a: 0 for a in env.agents}

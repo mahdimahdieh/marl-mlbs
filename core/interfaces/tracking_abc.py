@@ -7,10 +7,8 @@ class TrackingABC(ABC):
 
     @abstractmethod
     def log_episode(self, metrics: Dict[str, float], step: int) -> None:
-        """
-        Logs terminal metrics (Episodic Reward, Length, System Efficiency).
-        Called ONLY at terminal states to prevent I/O blocking during the step loop.
-        """
+        """Logs terminal metrics (reward, length, efficiency); called only at
+        terminal states to avoid I/O blocking during the step loop."""
         pass
 
     @abstractmethod

@@ -58,12 +58,8 @@ def _run_random_steps(env, n_steps, seed=0):
 
 
 # --- Task 1: reward scaling must be STATIONARY, not a running normalizer ---- #
-# The original bug: team_norm (a RunningNorm) tracked the live policy's
-# coverage stream. As coverage converged to ~0.95, mean -> 0.95 and
-# normalize() -> (0.95 - 0.95)/std ~ 0.0: the positive reward terms vanished
-# exactly at the goal while overlap penalties survived, collapsing episodic
-# reward from +20.75 to -160.16 at ~98% coverage. Bounded [0, 1] metrics now
-# pass through a fixed StationaryScaler.
+# The old RunningNorm tracked the live policy's coverage stream, so converged
+# coverage was worth ~0 reward while overlap penalties survived.
 
 def test_bounded_reward_metrics_use_stationary_scaler_not_running_norm():
     env, _, _ = make_env(max_cycles=5)
@@ -89,11 +85,9 @@ def test_bounded_reward_metrics_use_stationary_scaler_not_running_norm():
 
 
 def test_reward_signal_is_stationary_across_episodes():
-    """The core Task-1 regression: identical (seed, actions) must produce
-    IDENTICAL per-step rewards in episode 1 and in a later episode. The old
-    RunningNorm accumulated statistics across episodes, so the same coverage
-    state was worth progressively less reward as training proceeded — the
-    'reward plummets while coverage rises' signature."""
+    """Identical (seed, actions) must produce IDENTICAL per-step rewards in
+    episode 1 and in a later episode (the old RunningNorm devalued the same
+    coverage state as training proceeded)."""
     env, _, _ = make_env(max_cycles=5)
 
     def run_episode(seed=0):
@@ -108,8 +102,8 @@ def test_reward_signal_is_stationary_across_episodes():
     first_episode = run_episode()
     assert len(first_episode) > 0
 
-    # Accumulate "history" — with RunningNorm these extra episodes would shift
-    # the normalizer statistics and devalue the identical later episode.
+    # Accumulate history — with RunningNorm these extra episodes would shift
+    # the statistics and devalue the identical later episode.
     for _ in range(3):
         run_episode()
 
@@ -128,8 +122,6 @@ def test_high_coverage_yields_monotonic_positive_team_reward_term():
     env, _, _ = make_env(max_cycles=5)
     env.reset(seed=0)
 
-    # Before AND after a long interaction history, the team term for high
-    # coverage must be strictly larger than for low coverage, and positive.
     for _ in range(4):
         if not env.agents:
             break
@@ -140,7 +132,7 @@ def test_high_coverage_yields_monotonic_positive_team_reward_term():
     assert high > 0.0, "high coverage must yield a strictly positive reward term"
 
 
-# --- Bug #2: get_global_state() after a terminal step must not zero out ---- #
+# --- get_global_state() after a terminal step must not zero out ------------ #
 
 def test_get_global_state_after_truncation_returns_real_features_not_zeros():
     env, manager, sim_adapter = make_env(num_vbs=2, num_fbs=1, max_cycles=3, termination_goal=0.999)

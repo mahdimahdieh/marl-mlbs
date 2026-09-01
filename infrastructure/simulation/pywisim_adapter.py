@@ -7,11 +7,8 @@ from core.interfaces.network_sim_abc import NetworkSimABC
 # import pywisim
 
 class PyWiSimAdapter(NetworkSimABC):
-    """
-    High-performance spatial simulation adapter.
-    Uses vectorized NumPy broadcasting for lightning-fast RL training,
-    with embedded entry-points to execute heavy PyWiSim logic during human evaluation.
-    """
+    """Vectorized NumPy spatial simulation adapter for fast RL training, with
+    commented hooks for heavy PyWiSim logic in eval mode."""
 
     def __init__(self, num_users: int = 100, map_dimensions: List[float] = None):
         self.num_users = num_users
@@ -28,10 +25,7 @@ class PyWiSimAdapter(NetworkSimABC):
         self.eval_mode = enabled
 
     def reset_spatial_distribution(self, seed: int = None) -> None:
-        """
-        Generates a strict, reproducible uniform user distribution.
-        Guarantees that the MDP initial state distribution doesn't introduce reward variance.
-        """
+        """Generates a strict, reproducible uniform user distribution."""
         rng = np.random.default_rng(seed)
 
         # Vectorized generation of user positions across 2D plane
@@ -39,27 +33,17 @@ class PyWiSimAdapter(NetworkSimABC):
         self.user_coords[:, 1] = rng.uniform(0.0, self.map_dimensions[1], size=self.num_users)
 
         # --- PYWISIM INTEGRATION HOOK ---
+        # Once instantiated, pywisim.WirelessEnv(...) must receive this same
+        # seed, or its internal channel RNG reintroduces non-determinism.
         if self.eval_mode:
-            # 1. Instantiate the PyWiSim System/Network configuration object
-            # self.pywisim_env = pywisim.WirelessEnv(width=self.map_dimensions[0], height=self.map_dimensions[1])
-            # 2. Iterate through self.user_coords and register them into PyWiSim's internal structures
-            # for x, y in self.user_coords:
-            #     ue = pywisim.UserEquipment(x=x, y=y)
-            #     self.pywisim_env.register_ue(ue)
-            # AUDIT FLAG: once pywisim.WirelessEnv(...) is uncommented, it must be
-            # constructed with this same `seed` (e.g. WirelessEnv(..., rng_seed=seed)).
-            # Its internal channel/SINR RNG is currently unaccounted for and will
-            # reintroduce non-determinism the instant this path goes live.
             pass
 
     def compute_coverage_matrix(
             self, agent_coords: np.ndarray, coverage_radii: np.ndarray
     ) -> np.ndarray:
-        """
-        Returns the raw (N_agents, N_users) boolean intersection matrix.
-        This is the ONLY correct input for differential reward computation.
-        Collapsing to per-agent counts (via .sum()) loses the per-user association
-        data required to compute counterfactual coverage.
+        """Returns the (N_agents, N_users) boolean intersection matrix — the
+        only correct input for differential reward computation (per-agent
+        counts lose the per-user association data).
 
         Args:
             agent_coords:   (N, 2) float32 — world coordinates of all active agents
@@ -77,10 +61,8 @@ class PyWiSimAdapter(NetworkSimABC):
     def compute_batched_coverage(
             self, agent_coords: np.ndarray, coverage_radii: np.ndarray
     ) -> np.ndarray:
-        """
-        Returns (N,) int32 per-agent user counts.
-        Now derived from compute_coverage_matrix() for single source of truth.
-        """
+        """Returns (N,) int32 per-agent user counts, derived from
+        compute_coverage_matrix() for a single source of truth."""
         if self.eval_mode:
             return self._compute_pywisim_coverage_eval(agent_coords, coverage_radii)
         # Sum the boolean matrix along the user axis to get counts per agent
@@ -89,23 +71,13 @@ class PyWiSimAdapter(NetworkSimABC):
         ).sum(axis=1, dtype=np.int32)
 
     def _compute_pywisim_coverage_eval(self, agent_coords: np.ndarray, coverage_radii: np.ndarray) -> np.ndarray:
-        """
-        Slower, high-fidelity cellular math execution reserved for metrics/testing visualization.
-        """
+        """Slower, high-fidelity cellular math reserved for evaluation."""
         counts = np.zeros(len(agent_coords), dtype=np.int32)
 
         # --- PYWISIM CODE COUPLING GUIDE ---
-        # 1. Update PyWiSim base station coordinate properties
-        # for i, (x, y) in enumerate(agent_coords):
-        #     self.pywisim_env.base_stations[i].set_position(x, y)
-        #     self.pywisim_env.base_stations[i].transmit_power_or_radius = coverage_radii[i]
-        #
-        # 2. Run PyWiSim's internal channel propagation / SINR calculator
-        # self.pywisim_env.compute_sinr_maps()
-        #
-        # 3. Query which UEs successfully associated based on real-world cellular models
-        # for i, bs in enumerate(self.pywisim_env.base_stations):
-        #     counts[i] = len(bs.get_associated_ues())
+        # 1. Set base station positions/radii on self.pywisim_env.base_stations
+        # 2. Run self.pywisim_env.compute_sinr_maps()
+        # 3. Read each station's associated UEs into counts[i]
 
         # Fallback to normal calculations if PyWiSim calls are commented out
         return self.compute_batched_coverage(agent_coords, coverage_radii)

@@ -7,7 +7,7 @@ from typing import Dict, Tuple, List
 
 
 def layer_init(layer: nn.Linear, std: float = np.sqrt(2), bias_const: float = 0.0) -> nn.Linear:
-    """Strict orthogonal initialization contract for stable MARL gradient flow."""
+    """Orthogonal initialization for stable MARL gradient flow."""
     nn.init.orthogonal_(layer.weight, std)
     nn.init.constant_(layer.bias, bias_const)
     return layer
@@ -35,33 +35,22 @@ class DiscreteActor(nn.Module):
 
 
 class CentralizedCritic(nn.Module):
-    """Training-time only. Deep-Sets pooling → permutation- and n_agents-invariant V(s).
+    """Training-time only. Deep-Sets pooling → permutation-invariant V(s).
 
-    FIXED (Task 4 — relational / topology-aware trunk): the old trunk pooled the
-    VBS and FBS encodings with two INDEPENDENT symmetric (mean, max) Deep-Sets
-    aggregations. That destroyed the tether relation between each FBS and its
-    host VBS — the pooled FBS feature was a bag of FBS encodings with no memory
-    of which VBS each one orbits. The trunk now cross-conditions every FBS's
-    encoding on its own host VBS's encoding BEFORE pooling: when
-    fbs_host_vbs_indices is supplied, each FBS encoding f_i is concatenated with
-    its host VBS encoding v_{host(i)} and passed through fbs_relational_net.
-    Because the concat happens per-pair and pooling is still mean/max over the
-    agent sets, permutation invariance across disjoint (VBS, FBS-group) pairs is
-    preserved while intra-pair relational context is retained.
-
-    The per-agent value heads (vbs_head/fbs_head) are unchanged in contract:
-    each consumes its own per-agent encoded features + the shared team-level
-    context `h`, so the {"team", "vbs", "fbs"} output dict HeterogeneousPPOManager
-    expects is preserved.
+    Topology-aware trunk (Task 4): when fbs_host_vbs_indices is supplied, each
+    FBS encoding is concatenated with its own host VBS encoding and refined by
+    fbs_relational_net BEFORE pooling, retaining the (VBS, FBS) tether relation
+    the old independent symmetric pooling destroyed. Intra-pair context is
+    kept while pooling stays permutation-invariant across disjoint pairs.
+    The per-agent value head outputs feed HeterogeneousPPOManager's
+    {"team", "vbs", "fbs"} contract unchanged.
     """
     def __init__(self, vbs_local_dim, fbs_local_dim, global_extra_dim, hidden=128):
         super().__init__()
         self.vbs_encoder = nn.Sequential(layer_init(nn.Linear(vbs_local_dim, hidden)), nn.Tanh())
         self.fbs_encoder = nn.Sequential(layer_init(nn.Linear(fbs_local_dim, hidden)), nn.Tanh())
-        # Relational net: (fbs encoding ∥ host-vbs encoding) -> refined FBS encoding.
-        # Used only when fbs_host_vbs_indices is provided (see forward). Kept
-        # hidden→hidden so the pooled/head dimensions are identical whether or not
-        # the relational context is enabled.
+        # (fbs encoding ∥ host-vbs encoding) -> refined FBS encoding; hidden→hidden
+        # keeps dimensions identical whether or not relational context is enabled.
         self.fbs_relational_net = nn.Sequential(
             layer_init(nn.Linear(hidden * 2, hidden)), nn.Tanh(),
         )
@@ -69,11 +58,10 @@ class CentralizedCritic(nn.Module):
             layer_init(nn.Linear(hidden * 4 + global_extra_dim, 128)), nn.Tanh(),
             layer_init(nn.Linear(128, 64)), nn.Tanh(),
         )
-        # One head per reward-generating distribution, so each baseline
-        # matches the stream it's subtracted from.
+        # One head per reward stream so each baseline matches what it subtracts.
         self.team_head = layer_init(nn.Linear(64, 1), std=1.0)
         # Agent-conditioned heads: input is [per-agent encoded features (hidden) ;
-        # pooled team context (64)] — see class docstring BUG LEDGER above.
+        # pooled team context (64)].
         self.vbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
         self.fbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
 
@@ -82,9 +70,7 @@ class CentralizedCritic(nn.Module):
         f = self.fbs_encoder(fbs_feats)  # (B, n_fbs, hidden) — per-agent, pre-pooling
 
         if fbs_host_vbs_indices is not None:
-            # Relational cross-conditioning: each FBS encoding gets concatenated
-            # with ITS OWN host VBS encoding (v[:, host(i)]), then refined. This
-            # restores the tether relation the old bag-of-FBS pooling erased.
+            # Cross-condition each FBS encoding with ITS OWN host VBS encoding.
             host_idx = torch.as_tensor(
                 fbs_host_vbs_indices, dtype=torch.long, device=v.device
             )  # (n_fbs,)
@@ -100,18 +86,15 @@ class CentralizedCritic(nn.Module):
         h_for_vbs = h.unsqueeze(1).expand(-1, n_vbs, -1)  # (B, n_vbs, 64)
         h_for_fbs = h.unsqueeze(1).expand(-1, n_fbs, -1)  # (B, n_fbs, 64)
 
-        # (B, n_vbs, 1) -> (B, n_vbs); one value per VBS agent, conditioned on its
-        # own encoded features AND the shared team context.
+        # One value per agent, conditioned on its own features AND team context.
         vbs_values = self.vbs_head(torch.cat([v, h_for_vbs], dim=-1)).squeeze(-1)
         fbs_values = self.fbs_head(torch.cat([f, h_for_fbs], dim=-1)).squeeze(-1)
 
         return {"team": self.team_head(h), "vbs": vbs_values, "fbs": fbs_values}
 
 class HeterogeneousPPOManager:
-    """
-    Manages isolated optimization updates for disparate agent types (VBS vs FBS)
-    to completely avoid weight pollution.
-    """
+    """Manages isolated optimization updates for disparate agent types
+    (VBS vs FBS) to avoid weight pollution."""
 
     def __init__(self, vbs_obs_dim, fbs_obs_dim, vbs_action_dim, fbs_action_dim,
                  global_extra_dim: int, lr: float = 3e-4, device: str = "cpu"):
@@ -131,21 +114,10 @@ class HeterogeneousPPOManager:
         return action.cpu().item(), log_prob.cpu().item()
 
     def get_value(self, vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=None):
-        """Returns {"team": float, "vbs": List[float], "fbs": List[float]}.
-
-        team is still a single scalar (team_head is unchanged). vbs/fbs are now
-        one value PER AGENT (see CentralizedCritic BUG LEDGER) in the same agent
-        order as the vbs_feats/fbs_feats rows passed in (i.e. the order produced
-        by env.get_global_state()) — callers must preserve that ordering when
-        matching these values back to agent_ids.
-
-        fbs_host_vbs_indices (Task 4) is the relational topology cue from
-        env.get_fbs_host_vbs_indices(): for each FBS row, the row index of its
-        host VBS in vbs_feats. Passing it enables the critic's host-paired
-        relational trunk; the SAME cue must be supplied to update_critic so the
-        critic is trained on the exact forward path used at rollout time
-        (train/serve consistency).
-        """
+        """Returns {"team": float, "vbs": List[float], "fbs": List[float]} with
+        one value per agent, in the vbs_feats/fbs_feats row order produced by
+        env.get_global_state(). Supply the same fbs_host_vbs_indices to
+        update_critic so training runs on the exact forward path used here."""
         self.critic.eval()
         with torch.no_grad():
             out = self.critic(
@@ -207,13 +179,10 @@ class HeterogeneousPPOManager:
                 self.actor_optimizer.step()
 
     def update_critic(self, joint_batch, vf_coef=0.5, ppo_epochs=4, batch_size=64, clip_coef=0.2):
-        """One training SAMPLE (row) per ENVIRONMENT STEP, matching the pooled
-        vbs_feats/fbs_feats/global_extra inputs. "team" targets are a scalar per
-        step (team_head, unchanged). "vbs"/"fbs" targets are now a vector of one
-        value PER AGENT per step (see CentralizedCritic BUG LEDGER) — each column
-        trains the corresponding per-agent output slot of vbs_head/fbs_head against
-        that specific agent's own return, rather than a single type-mean target
-        applied identically across agents."""
+        """One training row per ENVIRONMENT STEP. "team" targets are scalar per
+        step; "vbs"/"fbs" targets are (T, n_agents) matrices — each column
+        trains the corresponding per-agent output slot against that agent's
+        own return."""
         self.critic.train()
         b_vbs = torch.tensor(np.array(joint_batch["vbs_feats"]), dtype=torch.float32, device=self.device)
         b_fbs = torch.tensor(np.array(joint_batch["fbs_feats"]), dtype=torch.float32, device=self.device)
@@ -227,11 +196,7 @@ class HeterogeneousPPOManager:
         b_returns = {k: torch.tensor(v[0], dtype=torch.float32, device=self.device) for k, v in heads.items()}
         b_values = {k: torch.tensor(v[1], dtype=torch.float32, device=self.device) for k, v in heads.items()}
 
-        # Task 4: train the critic on the SAME host-paired relational forward
-        # path used at rollout time (main.py stores the cue in
-        # joint_buffer["fbs_host_vbs_indices"] once per episode — the VBS/FBS
-        # tether topology is fixed for the whole episode). Optional: without it
-        # the trunk falls back to the symmetric bag-of-FBS pooling.
+        # Train on the same host-paired relational forward path get_value uses.
         host_indices = joint_batch.get("fbs_host_vbs_indices")
 
         dataset_size = b_returns["team"].shape[0]
@@ -273,4 +238,3 @@ class HeterogeneousPPOManager:
                 logits = torch.where(action_mask.bool(), logits, torch.full_like(logits, -1e9))
             action = logits.argmax(dim=-1)
         return action.cpu().item()
-

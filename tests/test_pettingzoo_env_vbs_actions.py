@@ -1,16 +1,8 @@
 """
-Regression coverage for the VBS action-space fix in rl/envs/pettingzoo_env.py.
-
-BUG LEDGER context: VBS actions used to be relative deltas (increment/decrement
-current_slot_index depending on whether the chosen action matched
-current_branch_id). These tests pin down the new absolute, factored
-(branch, slot) contract so that regression back to relative semantics is
-caught immediately:
-  - action_space size reflects branches * (slots + 1)
-  - a single action call fully determines (current_branch_id, current_slot_index)
-    with no dependency on the agent's previous state
-  - the action mask no longer needs to forbid any action (no overshoot is
-    possible under absolute selection)
+Regression coverage for the VBS action-space contract: absolute, factored
+(branch, slot) selection — action_space size, one-step decode to a fully
+determined state with no prior-state dependency, and unrestricted masking
+(overshoot is structurally impossible under absolute selection).
 """
 import os
 import pytest
@@ -80,8 +72,8 @@ def test_apply_actions_sets_absolute_state_regardless_of_prior_state(env):
     assert vbs.current_branch_id == 2
     assert vbs.current_slot_index == 7
 
-    # A single action call must fully re-determine state — no multi-step
-    # transit required, and no dependency on the previous (branch=2, slot=7).
+    # A single action call must fully re-determine state — no transit, no
+    # dependency on the previous (branch=2, slot=7).
     env._apply_actions({"vbs_0": 32, "fbs_1": 0})  # branch 3, slot 10
     assert vbs.current_branch_id == 3
     assert vbs.current_slot_index == 10
@@ -93,8 +85,7 @@ def test_apply_actions_sets_absolute_state_regardless_of_prior_state(env):
 
 
 def test_vbs_action_mask_is_never_restricted(env):
-    # Push VBS to the max slot on some branch, then confirm no action index
-    # is masked out (overshoot is structurally impossible now).
+    # At the max slot, no action index is masked out (no overshoot possible).
     env._apply_actions({"vbs_0": 10, "fbs_1": 0})  # branch 1, slot 10 (max)
     _, infos = env._compute_observations_and_masks()
     mask = infos["vbs_0"]["action_mask"]

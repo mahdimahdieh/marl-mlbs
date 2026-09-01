@@ -1,38 +1,7 @@
 """
-Automated multi-agent inference / evaluation harness for the VBS/FBS coverage task.
-
-Rewritten from scratch. Fixes relative to the previous implementation
-(full detail in the accompanying bug ledger):
-
-  1. HeterogeneousPPOManager was instantiated without `global_extra_dim`,
-     a required constructor argument -> guaranteed TypeError before any
-     episode ran. Fixed by deriving it from `env.global_extra_dim`, exactly
-     as main.py already does.
-  2. Checkpoint filenames didn't match what main.py._save_models() writes
-     ("vbs_net.pt"/"fbs_net.pt" vs the real "vbs_actor.pt"/"fbs_actor.pt"),
-     so a valid checkpoint directory was silently rejected and the script
-     always fell back to an untrained policy. Fixed, and the fallback is
-     now opt-in (--allow-untrained) instead of silent.
-  3. Action selection used the stochastic sampling head (get_action)
-     instead of the deterministic policy that already existed on
-     HeterogeneousPPOManager (get_deterministic_action) but was never
-     called anywhere. Deterministic is now the default; --stochastic
-     opts back into sampling.
-  4. The final rendered frame of a solved episode was empty, because
-     CoverageParallelEnv.step() clears env.agents on the terminal
-     transition and the old code rendered *after* stepping, reading the
-     now-empty live list. Fixed by rendering the terminal frame from a
-     pre-step agent snapshot.
-  5. The script ran exactly one hardcoded episode and printed nothing
-     machine-readable. Fixed with a CLI, multi-episode batch evaluation,
-     aggregate statistics, and an optional JSON summary for downstream
-     automation / CI regression checks.
-  6. There was no headless path, so this couldn't run on a display-less
-     training server. Fixed with --headless, which never imports pygame
-     at all and only computes metrics.
-  7. The model directory had to be hand-edited in source before every
-     run. Fixed with --model-dir defaulting to auto-discovery of the
-     most recent timestamped run under --models-root.
+Automated multi-agent inference / evaluation harness for the VBS/FBS coverage
+task. Deterministic evaluation by default, multi-episode batch statistics,
+optional rendering / frame dumps, and a JSON summary for CI regression checks.
 
 Usage:
     python inference.py --model-dir models/20260702-220816 --episodes 20 --headless
@@ -69,7 +38,7 @@ class EpisodeResult:
     true_coverage: float
     total_reward: float
     mean_reward_per_step: float
-    terminated: bool  # reached the 95% true-coverage objective
+    terminated: bool  # reached the coverage goal
     truncated: bool   # hit max_cycles without reaching it
 
 
@@ -102,8 +71,8 @@ class EvalSummary:
 # --------------------------------------------------------------------------- #
 
 def discover_latest_model_dir(models_root: str) -> Optional[str]:
-    """Returns the lexicographically-last (== most recent, given the
-    YYYYMMDD-HHMMSS naming from main.py) subdirectory under models_root."""
+    """Returns the most recent (lexicographically-last, given the
+    YYYYMMDD-HHMMSS naming) subdirectory under models_root."""
     candidates = sorted(c for c in glob.glob(os.path.join(models_root, "*")) if os.path.isdir(c))
     return candidates[-1] if candidates else None
 
@@ -171,7 +140,8 @@ def run_episode(
 
         actions: Dict[str, int] = {}
 
-        # FIXED: same causality fix as main.py — VBS processed first.
+        # VBS first (same causality fix as main.py): FBS observe their host's
+        # committed action via preview_vbs_world_coords before choosing.
         for agent_id in env.agents:
             if "vbs" not in agent_id:
                 continue
@@ -201,15 +171,12 @@ def run_episode(
                 action, _ = ppo.get_action(t_obs, "fbs", action_mask=t_mask)
             actions[agent_id] = action
 
-        # Snapshot BEFORE stepping: CoverageParallelEnv.step() empties env.agents
-        # on the terminal transition, which would otherwise make the final
-        # rendered frame of a solved episode show an empty scene.
+        # Snapshot BEFORE stepping: step() empties env.agents on the terminal
+        # transition, which would otherwise blank the final rendered frame.
         pre_step_agents = list(env.agents)
 
         obs_dict, rewards_dict, terminations, truncations, infos_dict = env.step(actions)
-        # Team-mean reward, matching the convention main.py already uses for
-        # joint_buffer["rewards"] -- a sum would trivially scale with agent
-        # count and wouldn't be comparable across configs.
+        # Team-mean reward, matching main.py's joint_buffer convention.
         total_reward += float(np.mean(list(rewards_dict.values()))) if rewards_dict else 0.0
         step += 1
 
