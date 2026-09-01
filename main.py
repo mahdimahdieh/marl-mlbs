@@ -65,6 +65,11 @@ def bootstrap_environment(config_path: str, graph_path: str):
         "max_slot_per_branch": config.get("graph_settings", {}).get("max_slots_per_branch", 10),
         "overlap_penalty_weight": config["hyperparameters"].get("overlap_penalty_weight", 0.20),
     }
+    # Optional per-type local-sensing multipliers (env supplies defaults).
+    env_settings = config["env_settings"]
+    for key in ("vbs_sensing_radius_multiplier", "fbs_sensing_radius_multiplier"):
+        if key in env_settings:
+            env_config[key] = env_settings[key]
 
     return env_config, config["hyperparameters"], config
 
@@ -115,6 +120,13 @@ def _save_models(ppo: "HeterogeneousPPOManager", save_dir: str, episode: int) ->
     print(f"Checkpoint saved {save_dir}/*.pt  [ep {episode}]")
 
 
+def _dump_metrics_history(save_dir: str, metrics_history: List[Dict[str, float]]) -> None:
+    """A/B harness artifact: per-episode metrics so tools/ab_compare.py can
+    diff two runs without TensorBoard."""
+    with open(os.path.join(save_dir, "metrics_history.json"), "w") as f:
+        json.dump(metrics_history, f)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train VBS/FBS Base Stations")
     parser.add_argument("--config", type=str, default="config/simulation_config.json")
@@ -161,7 +173,8 @@ def main():
         fbs_action_dim=fbs_action_dim,
         global_extra_dim=global_extra_dim,
         lr=hp["learning_rate"],
-        device=device
+        device=device,
+        critic_arch=hp.get("critic_arch", "deepsets"),
     )
 
     tracker = TensorBoardTracker(
@@ -178,6 +191,7 @@ def main():
     reward_window = deque(maxlen=100)
     coverage_window = deque(maxlen=100)
     solve_window = deque(maxlen=100)  # 1.0 if the episode reached the true-coverage goal
+    metrics_history: List[Dict[str, float]] = []
 
     # 2. Training Loop
     for episode in range(1, args.episodes + 1):
@@ -400,6 +414,7 @@ def main():
             "Diagnostics/Truncated": 1.0 if episode_truncated else 0.0,
         }
         tracker.log_episode(metrics, step=episode)
+        metrics_history.append(metrics)
 
         if episode % args.log_every == 0:
             print(
@@ -411,8 +426,10 @@ def main():
             )
         if episode % args.save_every == 0:
             _save_models(ppo, save_dir, episode)
+            _dump_metrics_history(save_dir, metrics_history)
 
     _save_models(ppo, save_dir, args.episodes)  # Final save regardless of cadence
+    _dump_metrics_history(save_dir, metrics_history)
     print("Training Complete. Models saved. Run inference.py to visualize.")
     tracker.close()
     print("Training Complete. Models ready for PyWiSim Evaluation.")

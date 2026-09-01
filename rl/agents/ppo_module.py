@@ -92,16 +92,89 @@ class CentralizedCritic(nn.Module):
 
         return {"team": self.team_head(h), "vbs": vbs_values, "fbs": fbs_values}
 
+class AttentionCritic(nn.Module):
+    """Training-time only. D-v2: agent-token self-attention with the
+    (VBS, host-FBS) tether as an additive attention bias.
+
+    Same forward signature and {"team", "vbs", "fbs"} output contract as
+    CentralizedCritic, so HeterogeneousPPOManager is arch-agnostic. Kept
+    OFFLINE-GATED: the default critic_arch stays "deepsets" until
+    tools/offline_critic_eval.py shows an explained-variance win.
+    """
+
+    def __init__(self, vbs_local_dim, fbs_local_dim, global_extra_dim, hidden=128, n_heads=4):
+        super().__init__()
+        self.n_heads = n_heads
+        self.vbs_encoder = nn.Sequential(layer_init(nn.Linear(vbs_local_dim, hidden)), nn.Tanh())
+        self.fbs_encoder = nn.Sequential(layer_init(nn.Linear(fbs_local_dim, hidden)), nn.Tanh())
+        self.attn = nn.MultiheadAttention(hidden, n_heads, batch_first=True)
+        # Additive bias on attention logits between each FBS and its host VBS.
+        self.tether_bias = nn.Parameter(torch.tensor(2.0))
+        self.trunk = nn.Sequential(
+            layer_init(nn.Linear(hidden * 2 + global_extra_dim, 128)), nn.Tanh(),
+            layer_init(nn.Linear(128, 64)), nn.Tanh(),
+        )
+        self.team_head = layer_init(nn.Linear(64, 1), std=1.0)
+        self.vbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
+        self.fbs_head = layer_init(nn.Linear(hidden + 64, 1), std=1.0)
+
+    def _tether_bias(self, n_vbs, n_fbs, fbs_host_vbs_indices, device):
+        """(L, L) additive logit bias: tether_bias on (FBS i, host VBS j)
+        pairs, symmetric in query/key direction."""
+        if fbs_host_vbs_indices is None or n_fbs == 0:
+            return None
+        L = n_vbs + n_fbs
+        bias = torch.zeros(L, L, device=device)
+        host_idx = torch.as_tensor(fbs_host_vbs_indices, dtype=torch.long, device=device)
+        fbs_rows = torch.arange(n_vbs, L, device=device)
+        bias[fbs_rows, host_idx] = self.tether_bias
+        bias[host_idx, fbs_rows] = self.tether_bias
+        return bias
+
+    def forward(self, vbs_feats, fbs_feats, global_extra, fbs_host_vbs_indices=None):
+        B, n_vbs = vbs_feats.shape[0], vbs_feats.shape[1]
+        n_fbs = fbs_feats.shape[1]
+
+        v = self.vbs_encoder(vbs_feats)  # (B, n_vbs, hidden)
+        f = self.fbs_encoder(fbs_feats)  # (B, n_fbs, hidden)
+        tokens = torch.cat([v, f], dim=1)  # (B, L, hidden), L = n_vbs + n_fbs
+
+        bias = self._tether_bias(n_vbs, n_fbs, fbs_host_vbs_indices, tokens.device)
+        attn_mask = bias.repeat(B * self.n_heads, 1, 1) if bias is not None else None
+        attended, _ = self.attn(tokens, tokens, tokens,
+                                attn_mask=attn_mask, need_weights=False)
+        tokens = tokens + attended  # residual connection
+
+        pool = torch.cat([tokens.mean(dim=1), tokens.max(dim=1).values], dim=-1)
+        h = self.trunk(torch.cat([pool, global_extra], dim=-1))  # (B, 64)
+
+        h_exp = h.unsqueeze(1).expand(-1, n_vbs + n_fbs, -1)
+        vbs_values = self.vbs_head(
+            torch.cat([tokens[:, :n_vbs], h_exp[:, :n_vbs]], dim=-1)).squeeze(-1)
+        fbs_values = self.fbs_head(
+            torch.cat([tokens[:, n_vbs:], h_exp[:, n_vbs:]], dim=-1)).squeeze(-1)
+
+        return {"team": self.team_head(h), "vbs": vbs_values, "fbs": fbs_values}
+
+
 class HeterogeneousPPOManager:
     """Manages isolated optimization updates for disparate agent types
     (VBS vs FBS) to avoid weight pollution."""
 
     def __init__(self, vbs_obs_dim, fbs_obs_dim, vbs_action_dim, fbs_action_dim,
-                 global_extra_dim: int, lr: float = 3e-4, device: str = "cpu"):
+                 global_extra_dim: int, lr: float = 3e-4, device: str = "cpu",
+                 critic_arch: str = "deepsets"):
         self.device = torch.device(device)
         self.vbs_actor = DiscreteActor(vbs_obs_dim, vbs_action_dim).to(self.device)
         self.fbs_actor = DiscreteActor(fbs_obs_dim, fbs_action_dim).to(self.device)
-        self.critic = CentralizedCritic(vbs_obs_dim, fbs_obs_dim, global_extra_dim).to(self.device)
+        if critic_arch == "deepsets":
+            self.critic = CentralizedCritic(vbs_obs_dim, fbs_obs_dim, global_extra_dim)
+        elif critic_arch == "attention":
+            self.critic = AttentionCritic(vbs_obs_dim, fbs_obs_dim, global_extra_dim)
+        else:
+            raise ValueError(
+                f"unknown critic_arch {critic_arch!r} (expected 'deepsets' or 'attention')")
+        self.critic = self.critic.to(self.device)
         self.actor_optimizer = optim.Adam(
             list(self.vbs_actor.parameters()) + list(self.fbs_actor.parameters()), lr=lr, eps=1e-5)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr, eps=1e-5)

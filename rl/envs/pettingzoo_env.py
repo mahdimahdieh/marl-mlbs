@@ -21,8 +21,11 @@ class CoverageParallelEnv(ParallelEnv):
     NUM_VBS_BRANCHES = 3
 
     # Local sensing radius is bounded and scaled off each agent's own
-    # coverage_radius (configurable via "sensing_radius_multiplier").
-    DEFAULT_SENSING_RADIUS_MULTIPLIER = 2.5
+    # coverage_radius. Per-type multipliers: the FBS coverage_radius is ~2x
+    # the VBS radius, so a smaller FBS multiplier keeps the ABSOLUTE sensing
+    # footprint (~30 map units) — and the "local" cue — genuinely local.
+    DEFAULT_VBS_SENSING_RADIUS_MULTIPLIER = 2.5
+    DEFAULT_FBS_SENSING_RADIUS_MULTIPLIER = 1.2
     # One-time bonus on the terminating step, scaled by steps saved vs max_cycles.
     TERMINAL_SPEED_BONUS = 5.0
     # Local sensing uses an 8-sector angular histogram (not a vector mean,
@@ -40,9 +43,19 @@ class CoverageParallelEnv(ParallelEnv):
         self.max_cycles = config.get("max_cycles", 100)
         self.map_dim = self.graph_engine.get_map_dimension()
         self.max_slot_per_branch = float(config.get("max_slot_per_branch", 10))
-        self.sensing_radius_multiplier = float(
-            config.get("sensing_radius_multiplier", self.DEFAULT_SENSING_RADIUS_MULTIPLIER)
-        )
+        # Legacy "sensing_radius_multiplier" (uniform for both types) is
+        # honored when the per-type keys are absent.
+        legacy_multiplier = config.get("sensing_radius_multiplier")
+        self.vbs_sensing_radius_multiplier = float(config.get(
+            "vbs_sensing_radius_multiplier",
+            legacy_multiplier if legacy_multiplier is not None
+            else self.DEFAULT_VBS_SENSING_RADIUS_MULTIPLIER,
+        ))
+        self.fbs_sensing_radius_multiplier = float(config.get(
+            "fbs_sensing_radius_multiplier",
+            legacy_multiplier if legacy_multiplier is not None
+            else self.DEFAULT_FBS_SENSING_RADIUS_MULTIPLIER,
+        ))
         # Static hyperparameter (Task 5): ramping a penalty inside step() would
         # mutate the transition dynamics mid-training (MDP non-stationarity).
         self.overlap_penalty_weight = float(config.get("overlap_penalty_weight", 0.20))
@@ -351,7 +364,10 @@ class CoverageParallelEnv(ParallelEnv):
                 raw_coverage_frac = 0.0
 
             # Local, bounded directional sensing cue for both agent types.
-            sensing_radius = agent_obj.coverage_radius * self.sensing_radius_multiplier
+            sensing_radius = agent_obj.coverage_radius * (
+                self.vbs_sensing_radius_multiplier if is_vbs
+                else self.fbs_sensing_radius_multiplier
+            )
             local_sector_fracs, uncovered_presence = self._local_sensing_features(
                 x, y, sensing_radius, uncovered_coords
             )

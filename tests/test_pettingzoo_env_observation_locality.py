@@ -170,3 +170,85 @@ def test_global_extra_dim_unaffected_by_locality_fix():
     density grid — unaffected by the locality fixes."""
     env, _, _ = make_env(num_vbs=2)
     assert env.global_extra_dim == 1 + env.uncovered_grid_size ** 2
+
+
+# --- Per-type sensing multipliers ------------------------------------------- #
+
+def make_env_with_fbs(sensing_config):
+    """Env with one VBS (host, at center) + one hovering FBS, so the FBS sits
+    at (30, 50) and its sensing footprint can be probed directly."""
+    graph_engine = NetworkXRoadEngine()
+    graph_engine.load_from_json(GRAPH_PATH)
+
+    manager = AgentManager()
+    manager.register_vbs(VehicleBaseStation(id=0, capacity=10, coverage_radius=15.0))
+    manager.register_fbs(FlyingBaseStation(
+        id=1, host_vbs_id=0, capacity=10, coverage_radius=25.0, maximum_distance=30.0))
+    manager.assign_home_branches(num_branches=3)
+    manager.assign_identity_indices()
+
+    sim_adapter = PyWiSimAdapter(num_users=20, map_dimensions=graph_engine.get_map_dimension())
+    config = {
+        "agent_manager": manager,
+        "graph_engine": graph_engine,
+        "sim_adapter": sim_adapter,
+        "max_cycles": 10,
+        "termination_goal": 0.95,
+        "max_slot_per_branch": 10,
+    }
+    config.update(sensing_config)
+    env = CoverageParallelEnv(config)
+    env.reset(seed=0)
+    return env, manager, sim_adapter
+
+
+def test_fbs_default_sensing_radius_is_genuinely_local():
+    """FBS coverage_radius is 25: the default 1.2 multiplier gives a 30-unit
+    sensing footprint, so an uncovered user at distance 45 — inside the old
+    quasi-global 2.5*25=62.5 footprint — must NOT be detected."""
+    env, manager, sim_adapter = make_env_with_fbs({})
+
+    assert env.fbs_sensing_radius_multiplier == CoverageParallelEnv.DEFAULT_FBS_SENSING_RADIUS_MULTIPLIER
+    assert env.vbs_sensing_radius_multiplier == CoverageParallelEnv.DEFAULT_VBS_SENSING_RADIUS_MULTIPLIER
+
+    env._apply_actions({"vbs_0": 0, "fbs_1": 0})  # both at center (30, 50)
+    fbs = manager.fbs_registry[1]
+    x, y = env._calculate_world_coords(fbs, False)
+    assert (x, y) == (30.0, 50.0)
+
+    sim_adapter.user_coords[:] = [x + 45.0, y]  # dist 45: outside 30, inside 62.5
+    env.last_coverage_matrix = np.zeros((len(env.agents), sim_adapter.num_users), dtype=bool)
+
+    obs, _ = env._compute_observations_and_masks()
+    sectors, presence = _extract_local_signal(obs["fbs_1"], env.n_fbs)
+    assert presence == 0.0, "a user at 45 units is outside the 30-unit local FBS footprint"
+    assert np.all(sectors == 0.0)
+
+
+def test_legacy_uniform_sensing_multiplier_still_applies_to_both_types():
+    """The legacy 'sensing_radius_multiplier' key (uniform for both types)
+    remains honored when no per-type keys are given."""
+    env, manager, sim_adapter = make_env_with_fbs({"sensing_radius_multiplier": 2.5})
+
+    assert env.fbs_sensing_radius_multiplier == 2.5
+    assert env.vbs_sensing_radius_multiplier == 2.5
+
+    env._apply_actions({"vbs_0": 0, "fbs_1": 0})
+    fbs = manager.fbs_registry[1]
+    x, y = env._calculate_world_coords(fbs, False)
+    sim_adapter.user_coords[:] = [x + 45.0, y]  # inside the legacy 62.5 footprint
+    env.last_coverage_matrix = np.zeros((len(env.agents), sim_adapter.num_users), dtype=bool)
+
+    obs, _ = env._compute_observations_and_masks()
+    sectors, presence = _extract_local_signal(obs["fbs_1"], env.n_fbs)
+    assert presence == 1.0, "the legacy uniform multiplier must keep its old behavior"
+
+
+def test_per_type_sensing_keys_override_legacy_key():
+    env, _, _ = make_env_with_fbs({
+        "sensing_radius_multiplier": 2.5,
+        "vbs_sensing_radius_multiplier": 1.0,
+        "fbs_sensing_radius_multiplier": 1.2,
+    })
+    assert env.vbs_sensing_radius_multiplier == 1.0
+    assert env.fbs_sensing_radius_multiplier == 1.2
