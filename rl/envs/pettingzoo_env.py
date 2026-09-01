@@ -552,3 +552,32 @@ class CoverageParallelEnv(ParallelEnv):
         global_extra = np.concatenate([[self.last_true_coverage], self.last_uncovered_grid.flatten()])
         assert global_extra.shape[0] == self.global_extra_dim, "global_extra drifted from declared schema"
         return vbs_feats, fbs_feats, global_extra
+
+    def preview_vbs_world_coords(self, vbs_agent_id: str, action: int) -> Tuple[float, float]:
+        """PURE preview — no state mutation. Reuses _decode_vbs_action +
+        get_edge_coordinates, the same path _apply_actions/_calculate_world_coords
+        use, so the preview can never drift from the physics actually applied in
+        Phase 1 of step(). Used by the rollout loop (main.py/inference.py) to let
+        FBS observe its host's COMMITTED action for this step before choosing its
+        own — see BUG LEDGER: FBS action-vs-observation causality gap (FBS used to
+        choose its action from a VBS position that was one full step stale)."""
+        branch_id, slot_index = self._decode_vbs_action(int(action))
+        if slot_index == 0:
+            return self.graph_engine.get_edge_coordinates(0, 1, 0.0)
+        traveled = slot_index / self.max_slot_per_branch
+        return self.graph_engine.get_edge_coordinates(0, branch_id, traveled)
+
+    def augment_fbs_obs(self, obs_row: np.ndarray, next_x: float, next_y: float) -> np.ndarray:
+        """Replaces the FBS's ema_x_norm/ema_y_norm slots (indices 9,10 in the
+        16+n_fbs layout — see observation_space()) with the normalized, PURE
+        preview of the host VBS's NEXT position (this step's committed action,
+        not last step's realized position). FIXED: closes the causality gap —
+        EMA's lagged-trend info is now strictly dominated by exact current
+        (host_true_x/y_norm) + exact next (this) position, so EMA is dropped
+        rather than appended, keeping obs width unchanged at 16 + n_fbs."""
+        next_x_norm = np.clip(next_x / self.map_dim[0], 0.0, 1.0)
+        next_y_norm = np.clip(next_y / self.map_dim[1], 0.0, 1.0)
+        out = obs_row.copy()
+        out[9] = next_x_norm  # was ema_x_norm
+        out[10] = next_y_norm  # was ema_y_norm
+        return out

@@ -208,12 +208,7 @@ class HeterogeneousPPOManager:
 
                 loss = 0.0
                 for k in ("team", "vbs", "fbs"):
-                    # Flatten uniformly: "team" is (batch, 1) -> (batch,); "vbs"/"fbs"
-                    # are (batch, n_agents) -> (batch * n_agents,). b_returns[k]/
-                    # b_values[k] are reshaped to match before flattening so each
-                    # element still pairs a per-agent (or per-step, for team)
-                    # prediction with its own matching target — never a shared
-                    # type-mean target broadcast across agents.
+
                     nv = new_out[k].reshape(-1)
                     target_returns = b_returns[k][mb_idx].reshape(nv.shape)
                     target_values = b_values[k][mb_idx].reshape(nv.shape)

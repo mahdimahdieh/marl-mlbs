@@ -170,15 +170,35 @@ def run_episode(
                     return _finalize(episode_index, seed, step, env, terminations, truncations, total_reward)
 
         actions: Dict[str, int] = {}
+
+        # FIXED: same causality fix as main.py — VBS processed first.
         for agent_id in env.agents:
-            agent_type = "vbs" if "vbs" in agent_id else "fbs"
+            if "vbs" not in agent_id:
+                continue
             t_obs = torch.tensor(obs_dict[agent_id], dtype=torch.float32).to(device)
             t_mask = torch.tensor(infos_dict[agent_id]["action_mask"], dtype=torch.float32).to(device)
 
             if deterministic:
-                action = ppo.get_deterministic_action(t_obs, agent_type, action_mask=t_mask)
+                action = ppo.get_deterministic_action(t_obs, "vbs", action_mask=t_mask)
             else:
-                action, _ = ppo.get_action(t_obs, agent_type, action_mask=t_mask)
+                action, _ = ppo.get_action(t_obs, "vbs", action_mask=t_mask)
+            actions[agent_id] = action
+
+        for agent_id in env.agents:
+            if "fbs" not in agent_id:
+                continue
+            host_vbs_id = env.agent_manager.fbs_registry[env._get_raw_id(agent_id)].host_vbs_id
+            next_x, next_y = env.preview_vbs_world_coords(f"vbs_{host_vbs_id}", actions[f"vbs_{host_vbs_id}"])
+
+            t_obs = torch.tensor(
+                env.augment_fbs_obs(obs_dict[agent_id], next_x, next_y), dtype=torch.float32
+            ).to(device)
+            t_mask = torch.tensor(infos_dict[agent_id]["action_mask"], dtype=torch.float32).to(device)
+
+            if deterministic:
+                action = ppo.get_deterministic_action(t_obs, "fbs", action_mask=t_mask)
+            else:
+                action, _ = ppo.get_action(t_obs, "fbs", action_mask=t_mask)
             actions[agent_id] = action
 
         # Snapshot BEFORE stepping: CoverageParallelEnv.step() empties env.agents

@@ -250,18 +250,44 @@ def main():
 
         while env.agents:
             actions = {}
+
+            # FIXED: FBS action-vs-observation causality gap — FBS chose its action
+            # from a VBS position one step stale (see BUG LEDGER). VBS agents are now
+            # processed FIRST so their committed action for this step is known before
+            # FBS's own get_action() call, letting FBS observe its host's NEXT
+            # position via env.preview_vbs_world_coords() (pure, no state mutation).
             for agent_id in env.agents:
-                agent_type = "vbs" if "vbs" in agent_id else "fbs"
+                if "vbs" not in agent_id:
+                    continue
                 t_obs = torch.tensor(obs_dict[agent_id], dtype=torch.float32)
                 t_mask = torch.tensor(infos_dict[agent_id]["action_mask"], dtype=torch.float32)
 
-                action, logprob = ppo.get_action(t_obs, agent_type, action_mask=t_mask)  # 2-tuple, not 3
+                action, logprob = ppo.get_action(t_obs, "vbs", action_mask=t_mask)
                 actions[agent_id] = action
 
-                buffers[agent_type][agent_id]["obs"].append(t_obs)
-                buffers[agent_type][agent_id]["masks"].append(t_mask)
-                buffers[agent_type][agent_id]["actions"].append(action)
-                buffers[agent_type][agent_id]["logprobs"].append(logprob)
+                buffers["vbs"][agent_id]["obs"].append(t_obs)
+                buffers["vbs"][agent_id]["masks"].append(t_mask)
+                buffers["vbs"][agent_id]["actions"].append(action)
+                buffers["vbs"][agent_id]["logprobs"].append(logprob)
+
+            for agent_id in env.agents:
+                if "fbs" not in agent_id:
+                    continue
+                host_vbs_id = env.agent_manager.fbs_registry[env._get_raw_id(agent_id)].host_vbs_id
+                next_x, next_y = env.preview_vbs_world_coords(f"vbs_{host_vbs_id}", actions[f"vbs_{host_vbs_id}"])
+
+                t_obs = torch.tensor(
+                    env.augment_fbs_obs(obs_dict[agent_id], next_x, next_y), dtype=torch.float32
+                )
+                t_mask = torch.tensor(infos_dict[agent_id]["action_mask"], dtype=torch.float32)
+
+                action, logprob = ppo.get_action(t_obs, "fbs", action_mask=t_mask)
+                actions[agent_id] = action
+
+                buffers["fbs"][agent_id]["obs"].append(t_obs)
+                buffers["fbs"][agent_id]["masks"].append(t_mask)
+                buffers["fbs"][agent_id]["actions"].append(action)
+                buffers["fbs"][agent_id]["logprobs"].append(logprob)
 
             vbs_feats, fbs_feats, global_extra = env.get_global_state()
             step_values = ppo.get_value(
