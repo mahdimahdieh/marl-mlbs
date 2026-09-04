@@ -187,7 +187,7 @@ def run_episode(
         if renderer is not None:
             if episode_done:
                 env.agents = pre_step_agents  # restore for one valid final frame
-            renderer.render(env, step)
+            renderer.render(env, step, episode_done=episode_done)
             if episode_done:
                 env.agents = []
             if frame_dir:
