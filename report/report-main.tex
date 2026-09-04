@@ -1,0 +1,693 @@
+\documentclass[a4paper,12pt,oneside]{report}
+
+% =============================================================================
+% Package Imports and Document Configuration
+% =============================================================================
+
+% --- Page Geometry and Margins ---
+\usepackage{geometry}
+\geometry{top=3cm, bottom=2.5cm, right=3cm, left=2.5cm}
+
+% --- Core Math and Graphics Packages ---
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{placeins}
+
+% --- Typography, Tables, and Spacing ---
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+
+% Table caption placed above, figure caption placed below
+\captionsetup[table]{position=above}
+\captionsetup[figure]{position=below}
+\captionsetup{labelfont=bf, textfont=bf}
+
+% --- Code Listings Configuration ---
+\usepackage{xcolor}
+\usepackage{listings}
+\definecolor{codeblue}{RGB}{50,90,140}
+\definecolor{codegray}{RGB}{120,120,120}
+\lstset{
+    language=Python,
+    basicstyle=\footnotesize\ttfamily,
+    keywordstyle=\color{codeblue}\bfseries,
+    commentstyle=\color{codegray}\itshape,
+    stringstyle=\color{purple},
+    numbers=left,
+    numberstyle=\tiny\color{codegray},
+    stepnumber=1,
+    numbersep=8pt,
+    backgroundcolor=\color{gray!5},
+    frame=lines,
+    frameround=tttt,
+    rulecolor=\color{gray!40},
+    tabsize=4,
+    captionpos=b,
+    breaklines=true,
+    breakatwhitespace=false
+}
+
+% --- Hyperlink Settings ---
+\usepackage[hidelinks]{hyperref}
+\hypersetup{
+    colorlinks=true,
+    citecolor=red,
+    linkcolor=darkgray,
+    urlcolor=cyan,
+    bookmarksnumbered=true
+}
+
+% --- Acronyms and Glossary Setup ---
+\usepackage[acronym, toc]{glossaries}
+\makeglossaries
+
+% --- Project Acronyms ---
+\newacronym{VBS}{VBS}{Vehicle Base Station}
+\newacronym{FBS}{FBS}{Flying Base Station}
+\newacronym{MARL}{MARL}{Multi-Agent Reinforcement Learning}
+\newacronym{RL}{RL}{Reinforcement Learning}
+\newacronym{PPO}{PPO}{Proximal Policy Optimization}
+\newacronym{CTDE}{CTDE}{Centralized Training with Decentralized Execution}
+\newacronym{GAE}{GAE}{Generalized Advantage Estimation}
+\newacronym{MDP}{MDP}{Markov Decision Process}
+\newacronym{POSG}{POSG}{Partially Observable Stochastic Game}
+
+% --- Header & Footer Configuration ---
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[R]{\footnotesize\nouppercase{\leftmark}}
+\fancyhead[L]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Suppress headers on chapter opening pages automatically
+\fancypagestyle{plain}{
+    \fancyhf{}
+    \fancyfoot[C]{\thepage}
+    \renewcommand{\headrulewidth}{0pt}
+}
+
+% --- Bi-directional and Persian Typesetting ---
+\usepackage[extrafootnotefeatures]{xepersian}
+
+% Set official fonts
+\settextfont[Scale=1.05]{Yas}
+\setlatintextfont{Times New Roman}
+\setdigitfont[Scale=1.05]{Yas}
+
+% Standard Persian paragraph spacing and indentation
+\setlength{\parindent}{0.8cm}
+\setlength{\parskip}{0.4em}
+
+% =============================================================================
+% Document Content Starts Here
+% =============================================================================
+\begin{document}
+
+% -----------------------------------------------------------------------------
+% Front Matter
+% -----------------------------------------------------------------------------
+\pagestyle{empty}
+
+% --- Bismillah Page ---
+\begin{center}
+    \vspace*{5cm}
+    {\Huge \textbf{بسم الله الرحمن الرحیم}}
+\end{center}
+\newpage
+
+% --- Cover / Title Page ---
+\begin{center}
+    \textbf{\Large دانشگاه اصفهان}\\[0.4cm]
+    \textbf{\large دانشکده مهندسی کامپیوتر}\\[0.3cm]
+    \textbf{\large گروه مهندسی نرم‌افزار}\\[2.5cm]
+
+    {\large پایان‌نامه کارشناسی}\\[0.3cm]
+    {\large رشته‌ مهندسی کامپیوتر}\\[1.5cm]
+
+    {\LARGE \textbf{بهینه‌سازی پویا و همکارانه پوشش شبکه سلولی با استفاده از}}\\[0.4cm]
+    {\LARGE \textbf{یادگیری تقویتی چندعامله ناهمگن (VBS و FBS)}}\\[3cm]
+
+    \begin{minipage}{0.45\textwidth}
+        \raggedright
+        \textbf{پژوهشگر:}\\
+        نام و نام خانوادگی دانشجو
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.45\textwidth}
+        \raggedleft
+        \textbf{استاد راهنما:}\\
+        دکتر نام استاد راهنما
+    \end{minipage}
+
+    \vfill
+    {\large سال تحصیلی ۱۴۰۴-۱۴۰۵}
+\end{center}
+\newpage
+
+% --- Defense and Approval Page ---
+\begin{center}
+    \textbf{\large دانشگاه اصفهان}\\[0.3cm]
+    \textbf{\large دانشکده مهندسی کامپیوتر}\\[0.3cm]
+    \textbf{\large گروه مهندسی نرم‌افزار}\\[1.8cm]
+\end{center}
+
+\noindent
+پروژه کارشناسی رشته‌ مهندسی کامپیوتر آقای/خانم ................ تحت عنوان:
+\begin{center}
+    \vspace{0.4cm}
+    \textbf{« بهینه‌سازی پویا و همکارانه پوشش شبکه سلولی با استفاده از یادگیری تقویتی چندعامله ناهمگن (VBS و FBS) »}
+    \vspace{0.4cm}
+\end{center}
+\noindent
+در تاریخ \quad / \quad / \quad ۱۴ \quad توسط هیأت داوران زیر بررسی و با نمره \qquad به تصویب نهایی رسید.\\[1.5cm]
+
+\noindent
+\textbf{۱- استاد راهنمای پروژه:}\\
+دکتر .............................................................. \hfill امضا\\[1.2cm]
+\textbf{۲- استاد داور:}\\
+دکتر .............................................................. \hfill امضا\\[2cm]
+
+\begin{center}
+    \textbf{امضای مدیر گروه}
+\end{center}
+\newpage
+
+% -----------------------------------------------------------------------------
+% Preliminaries
+% -----------------------------------------------------------------------------
+\pagestyle{plain}
+\pagenumbering{harfi}
+
+% --- Dedication ---
+\chapter*{تقديم به}
+\begin{center}
+    \vspace*{4cm}
+    {\large تقدیم به خانواده گرامی و تمامی اساتیدی که در این مسیر راهنما بودند.}
+\end{center}
+\newpage
+
+% --- Acknowledgements ---
+\chapter*{تشکر و قدرداني}
+مراتب قدردانی و سپاسگزاری از استاد راهنمای محترم و سایر عزیزانی که در اجرای این پروژه یاری رساندند.
+\newpage
+
+% --- Abstract and Keywords ---
+\chapter*{چکیده}
+در این بخش باید چکیده گزارش پروژه کارشناسی در حدود ۲۰۰ تا ۳۰۰ کلمه درج گردد. در این چکیده باید مسئله پوشش‌دهی دینامیک کاربران در شبکه‌های سلولی توسط ایستگاه‌های متحرک خودرویی (\gls{VBS}\LTRfootnote{Vehicle Base Station}) و پروازی (\gls{FBS}\LTRfootnote{Flying Base Station}) به عنوان دو عامل ناهمگن معرفی شود. سپس به چالش‌های هم‌پوشانی و وابستگی حرکتی پهپاد به خودرو پرداخته شده و رویکرد پیشنهادی مبتنی بر الگوریتم یادگیری تقویتی چندعامله (\gls{MARL}\LTRfootnote{Multi-Agent Reinforcement Learning}) با ساختار بهینه‌سازی سیاست پروکسیمال (\gls{PPO}\LTRfootnote{Proximal Policy Optimization}) ناهمگن توضیح داده شود. در نهایت به دستاوردهای کلیدی از جمله جلوگیری از رفت‌وبرگشت‌های نامتناهی با کنش مطلق، حل مسئله حرکت مرتبه دوم با پیش‌نمایش موقعیت، پایداری یادگیری با منتقد سه‌سر، و نتایج تعمیم‌پذیری مدل بر روی توزیع‌های تصادفی کاربران اشاره شود.
+
+\vspace{0.8cm}
+\noindent \textbf{واژگان کليدی:} یادگیری تقویتی چندعامله، ایستگاه پایه خودرویی، ایستگاه پایه پروازی، پوشش شبکه سلولی، آموزش متمرکز و اجرای غیرمتمرکز، الگوریتم PPO.
+\newpage
+
+% --- Lists ---
+\tableofcontents
+\newpage
+\listoffigures
+\newpage
+\listoftables
+\newpage
+
+% Print acronym list
+\printglossary[type=\acronymtype, title=مخفف‌ها]
+\newpage
+
+% -----------------------------------------------------------------------------
+% Main Body
+% -----------------------------------------------------------------------------
+\pagenumbering{arabic}
+\setcounter{page}{1}
+
+% =============================================================================
+% CHAPTER 1: INTRODUCTION
+% =============================================================================
+\chapter{مقدمه}
+در این بخش مقدمه‌ای بر مسئله مدیریت ترافیک و پوشش مخابراتی در شرایط اضطراری یا ازدحام ناگهانی نوشته می‌شود. باید توضیح داده شود که چرا ایستگاه‌های ثابت مخابراتی به تنهایی پاسخگوی این حجم از تقاضای پویا نیستند و چگونه ترکیب ایستگاه‌های خودرویی و پهپادی راه‌حلی نوین ارائه می‌دهد.
+
+\section{بیان مسئله و اهمیت موضوع}
+در این زیربخش، به طور شفاف مطرح می‌شود که با دو دسته عامل روبه‌رو هستیم: خودروهایی که روی جاده حرکت می‌کنند و پهپادهایی که به عنوان ایستگاه‌های پروازی به این خودروها متصل و وابسته هستند. هدف سیستم، پوشش‌دهی حداکثری و یکتای کاربران پراکنده در یک محیط دوبعدی است، به طوری که هم‌پوشانی میان ایستگاه‌ها به حداقل برسد و منابع هدر نرود.
+
+\section{اهداف پروژه}
+اهداف اصلی این پروژه کارشناسی به شرح زیر تعیین شده است:
+\begin{itemize}
+    \item طراحی محیط شبیه‌سازی استاندارد چندعامله بر بستر پلتفرم \lr{PettingZoo}.
+    \item بازطراحی فضای کنش عامل‌ها برای جلوگیری از قفل شدن در رفت‌وبرگشت‌های مکرر.
+    \item ایجاد هماهنگی میان خودرو و پهپاد وابسته از طریق پیش‌نمایش موقعیت فیزیکی.
+    \item طراحی تابع پاداش مبتنی بر سهم حاشیه‌ای به منظور جلوگیری از رفتار مفت‌سواری عامل‌ها.
+    \item پیاده‌سازی یادگیری تقویتی چندعامله با ساختار ارزیاب مرکزی سه‌سر جهت پایداری آموزش.
+    \item اعتبارسنجی قابلیت تعمیم مدل بر روی توزیع‌های مختلف کاربران در مرحله ارزیابی.
+\end{itemize}
+
+\section{کاربردهای پروژه}
+در این بخش کاربردهای عملیاتی این پروژه در دنیای واقعی تبیین می‌شود:
+\begin{itemize}
+    \item مدیریت بحران در بلایای طبیعی (مانند زلزله یا سیل که زیرساخت‌های ثابت قطع می‌شوند).
+    \item رویدادهای بزرگ عمومی و تجمعات موقت (همایش‌ها، مسابقات ورزشی و نمایشگاه‌ها).
+    \item سامانه‌های حمل‌ونقل هوشمند و اینترنت اشیا متحرک در شهرها.
+\end{itemize}
+
+\section{چالش‌های اصلی پیاده‌سازی}
+در این زیربخش چالش‌های مهندسی و تجربی مشاهده‌شده در مسیر توسعه به اختصار معرفی می‌شوند:
+\begin{itemize}
+    \item \textbf{حرکت مرتبه دوم پهپادها:} موقعیت پهپاد تابعی از حرکت خودروی میزبان و حرکت مستقل خودش است که هماهنگی مکانی را بسیار پیچیده می‌کند.
+    \item \textbf{رفت‌وبرگشت نامتناهی خودروها:} نوسان میان دو موقعیت متوالی در کنش‌های نسبی سنتی.
+    \item \textbf{نقطه کور حسگری متقارن:} خطای لغو شدن بردارهای جهت در مواجهه با دسته‌های متقارن کاربران.
+    \item \textbf{ناپایداری سیگنال پاداش:} اثرات سوء نرمال‌سازی پویا در شرایط پوشش بالا.
+\end{itemize}
+
+\section{ساختار پایان‌نامه}
+در این بخش ساختار ارائه فصل‌های گزارش تشریح می‌گردد: در فصل دوم مفاهیم پایه‌ای یادگیری تقویتی، محیط‌های چندعامله و الگوریتم‌های بهینه‌سازی معرفی می‌شوند. در فصل سوم، جزئیات مدل‌سازی محیط، گراف جاده، فضاهای کنش و مشاهده، و معماری شبکه‌های عصبی تشریح می‌گردد. در فصل چهارم، نتایج تجربی، نمودارهای همگرایی، آزمون‌های تعمیم‌پذیری و کارایی زمان اجرا بررسی می‌شوند. در نهایت، در فصل پنجم نتیجه‌گیری و پیشنهادات برای توسعه‌های آتی مطرح می‌گردد.
+
+% =============================================================================
+% CHAPTER 2: CONCEPTS
+% =============================================================================
+\chapter{مفاهیم}
+
+\section{مقدمه}
+در این بخش مقدمه‌ای از مباحث تئوری و فنی پایه‌ای که برای درک ادامه گزارش نیاز است آورده می‌شود. این مباحث شامل مفاهیم شبکه‌های سلولی، یادگیری تقویتی، ساختار چندعامله و الگوریتم بهینه‌سازی سیاست است.
+
+\section{شبکه‌های سلولی متحرک}
+در این بخش به زبان ساده مفاهیم پوشش سلولی، شعاع موثر امواج رادیویی و لزوم استقرار پویا برای پوشش کاربران تشریح می‌گردد.
+
+\subsection{ایستگاه‌های پایه خودرویی (VBS)}
+تعریف و ویژگی‌های خودروهایی که به آنتن‌های مخابراتی مجهز هستند و محدودیت‌های فیزیکی آن‌ها برای حرکت روی جاده‌های تعیین‌شده.
+
+\subsection{ایستگاه‌های پایه پرنده (FBS)}
+تعریف پهپادهای مجهز به فرستنده رادیویی، نحوه پرواز در ارتفاع مشخص، و قید وابستگی و مهار شدن آن‌ها به ایستگاه مادر زمینی.
+
+\section{یادگیری تقویتی و فرایند تصمیم‌گیری مارکوف}
+تعریف پایه‌ای عامل، محیط، کنش، مشاهده و پاداش در چارچوب فرایند تصمیم‌گیری مارکوف (\gls{MDP}\LTRfootnote{Markov Decision Process}). نیازی به اثبات‌های پیچیده نیست و تاکید بر مفاهیم کاربردی خواهد بود.
+
+\section{یادگیری تقویتی چندعامله (MARL)}
+توضیح تفاوت محیط‌های تک‌عامله و چندعامله، عدم ثبات محیط از دید هر عامل به دلیل تغییر رفتار همزمان سایر عامل‌ها، و معرفی پارادایم آموزش متمرکز و اجرای غیرمتمرکز (\gls{CTDE}\LTRfootnote{Centralized Training with Decentralized Execution}).
+
+\section{الگوریتم بهینه‌سازی سیاست پروکسیمال (PPO)}
+توضیح شهودی سازوکار بازیگر-منتقد (\lr{Actor-Critic})، منطق کلیپ کردن تغییرات سیاست برای جلوگیری از فروپاشی آموزش، و نحوه استفاده از تخمین‌گر مزیت تعمیم‌یافته (\gls{GAE}\LTRfootnote{Generalized Advantage Estimation}).
+
+\section{مقایسه محیط‌های شبیه‌سازی: Gymnasium و PettingZoo}
+در این بخش باید مقایسه‌ای کاربردی انجام شود که چرا کتابخانه معمول \lr{Gymnasium} برای این مسئله ناکافی است و چرا از واسط \lr{ParallelEnv} در \lr{PettingZoo} برای مدیریت چندعامله استفاده شده است.
+
+\begin{table}[H]
+    \centering
+    \caption{مقایسه ساختاری کتابخانه‌های شبیه‌سازی تک‌عامله و چندعامله}
+    \label{tab:gym_vs_pettingzoo}
+    \begin{tabular}{lcc}
+        \toprule
+        \textbf{ویژگی} & \textbf{Gymnasium} & \textbf{PettingZoo (ParallelEnv)} \\
+        \midrule
+        پشتیبانی از عامل‌ها & فقط یک عامل & چندین عامل همزمان و ناهمگن \\
+        قالب ورودی کنش & یک مقدار یا بردار واحد & دیکشنری با شناسه هر عامل \\
+        قالب خروجی مشاهدات و پاداش & مقادیر مستقل & دیکشنری‌های مجزا به ازای هر عامل \\
+        پایان زودهنگام اختصاصی & برای کل محیط & تفکیک‌پذیر برای هر عامل \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{جمع‌بندی}
+خلاصه یک پاراگرافی از مفاهیم تئوری و ابزارهایی که زمینه لازم را برای شرح طراحی سیستم در فصل بعد فراهم کردند.
+
+% =============================================================================
+% CHAPTER 3: PROJECT DESCRIPTION
+% =============================================================================
+\chapter{شرح پروژه}
+
+\section{مقدمه}
+در این بخش مقدمه‌ای از اجزای طراحی‌شده در پروژه، ساختار نرم‌افزاری و راه‌حل‌های ارائه‌شده برای چالش‌های مدل‌سازی آورده می‌شود.
+
+\section{مدل‌سازی محیط و شبکه جاده‌ای}
+در این بخش تشریح می‌شود که محیط به صورت یک صفحه دوبعدی با ابعاد مشخص در نظر گرفته شده و شبکه جاده‌ای خودروها به صورت یک گراف مدل شده است.
+
+
+\subsection{توپولوژی گراف جاده‌ای}
+توضیح ساختار گراف سه‌شاخه (\lr{Y-Graph}) با یک گره تقاطع مرکزی و شاخه‌های منشعب، و نحوه نگاشت آن در موتور \lr{NetworkXRoadEngine}.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for Project Architecture & Topology
+    \framebox[0.85\textwidth][c]{\raisebox{0pt}[5cm][5cm]{تصویر ساختار محیط: گراف جاده‌ای Y-شکل، گره مرکزی، خودروها، پهپادها و کاربران}}
+    \caption{شمای کلی محیط شبیه‌سازی و استقرار عامل‌ها بر روی نقشه و گراف جاده‌ای}
+    \label{fig:env_topology}
+\end{figure}
+
+\subsection{گسسته‌سازی شاخه‌ها به اسلات‌های مکانی}
+تقسیم هر شاخه گراف به چند بخش مساوی (اسلات) جهت مشخص کردن موقعیت‌های گسسته خودروها بر روی یال‌های گراف.
+
+\section{طراحی ماژولار و پیکربندی‌پذیری پویای سامانه}
+در این بخش باید به جداسازی منطق الگوریتم از پارامترها از طریق فایل‌های پیکربندی \lr{JSON} اشاره شود؛ همچنین به نقش تابع \lr{bootstrap\_environment} در مقداردهی پویای تعداد و مشخصات متغیر عامل‌های VBS و FBS، تعیین ظرفیت‌ها و فواصل، و تنظیم خودکار ابعاد ورودی و خروجی شبکه‌های عصبی بدون نیاز به تغییر در هسته یادگیری پرداخته شود.
+
+
+\section{مدل‌سازی و بازطراحی فضاهای کنش}
+این بخش یکی از مهم‌ترین بخش‌های فنی گزارش است که به تغییرات ثبت‌شده در سوابق گیت و رفع مشکلات اولیه می‌پردازد.
+
+\subsection{فضای کنش VBS: چرایی شکست مدل نسبی و گذار به کنش مطلق}
+در طراحی اولیه، کنش خودرو حرکتی گامی و نسبی بود (یک گام به جلو یا عقب). این روش به دلیل تغییرات پیوسته پاداش در محیط چندعامله منجر به پدیده چرخه دوحالته (\lr{2-State Limit Cycle}) و چرخش مداوم میان دو نقطه می‌شد. در طراحی جدید، کنش به صورت انتخاب مستقیم و مطلق شاخه و اسلات بازنویسی شد:
+\begin{equation}
+\text{Action}_{VBS} = (\text{Branch} - 1) \times (S_{max} + 1) + \text{Slot}
+\end{equation}
+که در آن $S_{max}$ حداکثر اسلات مجاز در هر شاخه است. این فرمول‌بندی فضای کنش را قطعی و بدون وابستگی به حالت قبلی می‌سازد.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for Circulation Problem
+    \framebox[0.75\textwidth][c]{\raisebox{0pt}[3.8cm][3.8cm]{تصویر مقایسه‌ای: نوسان رفت‌وبرگشت بین دو اسلات در کنش نسبی در برابر پرش مستقیم در کنش مطلق}}
+    \caption{حل مشکل قفل شدن در رفت‌وبرگشت‌های نامتناهی با جایگزینی کنش مطلق}
+    \label{fig:vbs_circulation_fix}
+\end{figure}
+
+\subsection{فضای کنش ۱۷ حالته FBS در مختصات قطبی محلی}
+فضای کنش پهپادها شامل ۱ حالت ثابت ماندن (هاور) و ۸ جهت قطب‌نما در دو سطح فاصله (نیم‌شعاع و تمام‌شعاع مجاز نسبت به خودروی مادر) است.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for 17-action FBS polar zones
+    \framebox[0.65\textwidth][c]{\raisebox{0pt}[4.5cm][4.5cm]{تصویر دو دایره هم‌مرکز با ۱۷ موقعیت گسسته: ۱ نقطه مرکز + ۸ نقطه در نیم‌فاصله + ۸ نقطه در فاصله کامل}}
+    \caption{گسسته‌سازی فضای حرکت محلی پهپاد به ۱۷ ناحیه مجزا نسبت به خودروی میزبان}
+    \label{fig:fbs_polar_actions}
+\end{figure}
+
+\subsection{حل چالش پویایی مرتبه دوم و تقدم علّی تصمیم‌گیری}
+از آنجا که جابه‌جایی خودرو مستقیماً مبدأ مختصات پهپاد را جابه‌جا می‌کند، پهپاد با حرکت مرتبه دوم روبه‌رو است. برای حل این مشکل، ابتدا کنش خودرو تعیین شده و سپس با تابع \lr{preview\_vbs\_world\_coords} موقعیت گام بعدی خودرو محاسبه و به دید محلی پهپاد تزریق می‌شود تا پهپاد بتواند بر اساس مقصد بعدی میزبان خود تصمیم‌گیری کند.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for Causal Decision Sequence
+    \framebox[0.85\textwidth][c]{\raisebox{0pt}[3.5cm][3.5cm]{دیاگرام توالی تصمیم‌گیری: تصمیم خودرو $\rightarrow$ پیش‌نمایش موقعیت $\rightarrow$ تصمیم پهپاد $\rightarrow$ اجرای فیزیک محیط}}
+    \caption{روال حفظ تقدم علّی و هماهنگی مکانی خودرو و پهپاد وابسته}
+    \label{fig:causal_decision_flow}
+\end{figure}
+
+\section{طراحی فضای مشاهدات محلی و حسگری سکتوری}
+در این بخش بردار ویژگی‌های هر عامل و چگونگی حفظ اصل اجرای نامتمرکز شرح داده می‌شود.
+
+\subsection{بردارهای ویژگی‌های محلی عامل‌ها}
+مشاهدات هر خودرو شامل مختصات نرمال‌شده، درصد پوشش کاربران، شناسه اسلات و شاخه فعلی، شاخه خانگی، و کد هویتی یکتا برای تمایز عامل‌های هم‌نوع است. مشاهدات پهپاد نیز شامل مختصات نرمال‌شده، درصد پوشش، مشخصات قطبی نسبت به خودرو، موقعیت پیش‌نمایش خودرو و کد هویتی است.
+
+\subsection{حسگری سکتوری محلی و حذف نقطه کور خوشه‌های متقارن}
+در نسخه‌های اولیه، یک بردار میانگین مرکزی از کل کاربران بدون‌پوشش نقشه به عامل‌ها داده می‌شد که باعث کشیده شدن همه به یک نقطه مشترک و همچنین خنثی شدن بردار (صفر شدن) در میان دو دسته کاربر متقارن می‌شد. در طراحی اصلاح‌شده، اطراف هر عامل به ۸ سکتور زاویه‌ای تقسیم شده و هیستوگرام تراکم کاربران در شعاع حسگری محلی محاسبه می‌شود؛ علاوه بر این، یک بیت حضور برای تعیین وجود داشتن کاربر در این شعاع اضافه شده است.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for Sector Sensing
+    \framebox[0.8\textwidth][c]{\raisebox{0pt}[4cm][4cm]{تصویر مقایسه‌ای حسگری: بردار میانگین مرکزی با نقطه کور متقارن در برابر هیستوگرام ۸ سکتوری محلی}}
+    \caption{سازوکار حسگری سکتوری محلی و رفع مشکل تجمع و نقاط کور مکانی}
+    \label{fig:sector_sensing}
+\end{figure}
+
+\section{طراحی تابع پاداش مهندسی‌شده و ایستا}
+پاداش هر عامل در هر گام به صورت ترکیبی از ۴ مؤلفه کلیدی تعریف شده است:
+\begin{equation}
+R_i = w_m \cdot S_m(C_{marginal, i}) + w_t \cdot S_t(C_{team}) - w_o \cdot \text{Overlap}_i + \text{Bonus}_{speed}
+\end{equation}
+
+\subsection{مؤلفه‌های پاداش}
+\begin{itemize}
+    \item \textbf{سهم حاشیه‌ای ($C_{marginal}$):} کاربرانی که منحصراً به لطف حضور همین عامل پوشش یافته‌اند (جلوگیری از مفت‌سواری).
+    \item \textbf{پاداش تیمی مشترک ($C_{team}$):} پوشش کل و یکتای شبکه که جهت کلی تیم را همسو می‌کند.
+    \item \textbf{جریمه هم‌پوشانی ($\text{Overlap}$):} نسبت کاربرانی که به صورت تکراری پوشش داده شده‌اند به کل کاربران تحت پوشش عامل (تشویق به پراکندگی).
+    \item \textbf{پاداش سرعت پایانی ($\text{Bonus}_{speed}$):} پاداش یک‌باره در صورت دستیابی به پوشش هدف، متناسب با تعداد گام‌های صرفه‌جویی‌شده.
+\end{itemize}
+
+\subsection{مقیاس‌بندی ایستا در برابر نرمال‌سازی پویا}
+توضیح این موضوع که چرا استفاده از نرمال‌ساز متحرک (\lr{RunningNorm}) باعث کاهش ارزش پاداش در وضعیت‌های با پوشش بالا می‌شد و چگونه استفاده از کلاس \lr{StationaryScaler} با حفظ ثبات مقیاس، انگیزه دستیابی و حفظ پوشش حداکثری را تثبیت کرد.
+
+\section{معماری شبکه‌های عصبی و ساختار منتقد سه‌سر}
+معماری مدل بر پایه چارچوب \gls{CTDE} بنا شده است.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for CTDE & Network Architecture
+    \framebox[0.85\textwidth][c]{\raisebox{0pt}[5cm][5cm]{دیاگرام معماری CTDE: شبکه Actor محلی برای هر عامل و شبکه Critic مرکزی سه‌سر با ورودی کامل}}
+    \caption{ساختار آموزش متمرکز و اجرای غیرمتمرکز سامانه با ارزیاب سه‌سر}
+    \label{fig:ctde_architecture}
+\end{figure}
+
+\subsection{شبکه‌های بازیگر (Actor)}
+برای هر نوع عامل (خودرو و پهپاد)، یک شبکه پرسپترون چندلایه با دو لایه مخفی ۶۴تایی و تابع فعال‌سازی \lr{Tanh} تعبیه شده که با دریافت مشاهدات محلی، توزیع احتمال کنش‌ها را تولید می‌کند.
+
+\subsection{شبکه منتقد مرکزی با خروجی سه‌سر (Three-Head Critic)}
+منتقد در زمان آموزش به کل وضعیت شبکه و توزیع کاربران دسترسی دارد. برای حفظ تطابق دقیق خط‌پایه (\lr{Baseline}) با پاداش‌های مختلف، منتقد به سه سر مجزا مجهز شده است:
+\begin{itemize}
+    \item \textbf{سر تیمی (\lr{team\_head}):} یک مقدار اسکالر برای پیش‌بینی ارزش پاداش اشتراکی تیم.
+    \item \textbf{سر خودروها (\lr{vbs\_head}):} برداری به طول تعداد خودروها برای پیش‌بینی دقیق ارزش هر خودرو بر اساس ویژگی‌های اختصاصی خودش و بستر تیمی.
+    \item \textbf{سر پهپادها (\lr{fbs\_head}):} برداری به طول تعداد پهپادها متناسب با ویژگی‌های پهپاد و وضعیت خودروی میزبان آن.
+\end{itemize}
+
+\subsection{جدول لایه‌ها و مشخصات پارامترهای مدل}
+در این بخش ساختار لایه‌ها و ابعاد بدون وارد شدن به ریاضیات سنگین در قالب جدول ارائه می‌شود.
+
+\begin{table}[H]
+    \centering
+    \caption{مشخصات ساختاری و ابعاد لایه‌های شبکه‌های عصبی}
+    \label{tab:network_parameters}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{بخش شبکه} & \textbf{ابعاد لایه ورودی} & \textbf{لایه‌های پنهان} & \textbf{ابعاد خروجی} \\
+        \midrule
+        Actor خودرو (VBS) & ابعاد مشاهده محلی VBS & $64 \times 64$ & تعداد کنش‌های مطلق VBS \\
+        Actor پهپاد (FBS) & ابعاد مشاهده محلی FBS & $64 \times 64$ & ۱۷ حالت قطبی \\
+        اینکودر VBS در Critic & ابعاد ویژگی محلی VBS & $128$ & $128$ \\
+        اینکودر FBS در Critic & ابعاد ویژگی محلی FBS & $128$ & $128$ \\
+        شبکه رابطه‌ای تتر & $128 \times 2$ & $128$ & $128$ \\
+        تنه اصلی Critic & تجمیع ویژگی‌ها + سراسری & $128 \times 64$ & $64$ \\
+        سرهای خروجی Critic & ۶۴ + ویژگی هر عامل & لایه خطی مستقیم & اسکالر تیمی و بردارهای عامل‌ها \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{ساختار جایگزین منتقد مبتنی بر مکانیزم توجه (Attention Critic)}
+معرفی ساختار پیشرفته‌تر منتقد که در آن به جای تجمیع ساده، از مکانیزم خود‌توجهی چندسره (\lr{Multi-Head Attention}) همراه با بایاس اختصاصی برای یال‌های اتصال پهپاد به خودرو استفاده شده است.
+
+\section{توابع ضرر و به‌روزرسانی مدل}
+در این زیربخش، نحوه به‌روزرسانی شبکه‌ها با روابط شفاف و کاربردی تشریح می‌شود:
+\begin{itemize}
+    \item \textbf{تابع ضرر بازیگر:} هدف کلیپ‌شده PPO برای جلوگیری از تغییرات شدید در سیاست به همراه ضریب آنتروپی برای حفظ اکتشاف.
+    \item \textbf{تابع ضرر منتقد:} مجموع خطای میانگین مربعات پیش‌بینی ارزش در هر سه سر نسبت به بازده‌های محاسبه‌شده توسط روش GAE.
+    \item \textbf{تمایز پایان و انقطاع:} در زمان پایان واقعی اپیزود، مقدار ارزش آینده صفر لحاظ می‌شود، اما در صورت اتمام سقف زمانی (\lr{Truncation})، مقدار تخمین‌زده‌شده توسط منتقد به عنوان مقدار بوت‌استرپ در نظر گرفته می‌شود تا هدف یادگیری دچار اریب نشود.
+\end{itemize}
+
+\section{جمع‌بندی}
+خلاصه یک پاراگرافی از معماری ارائه‌شده و تدابیر مهندسی به‌کاررفته برای آماده‌سازی سیستم جهت آزمایش و آموزش.
+
+% =============================================================================
+% CHAPTER 4: RESULTS
+% =============================================================================
+\chapter{نتایج}
+
+\section{مقدمه}
+در این بخش مقدمه‌ای از اهداف آزمایش‌ها، شرایط پیاده‌سازی و بسترهای سخت‌افزاری مورد استفاده در آموزش و ارزیابی مدل بیان می‌شود.
+
+\section{تنظیمات آزمایش‌ها و هایپرپارامترها}
+در این بخش مقادیر انتخاب‌شده برای پارامترهای محیط و آموزش در قالب یک جدول استاندارد گزارش می‌شود.
+
+\begin{table}[H]
+    \centering
+    \caption{مقادیر هایپرپارامترهای آموزش و شبیه‌سازی}
+    \label{tab:hyperparameters}
+    \begin{tabular}{lc}
+        \toprule
+        \textbf{پارامتر} & \textbf{مقدار} \\
+        \midrule
+        نرخ یادگیری (\lr{Learning Rate}) & $3 \times 10^{-4}$ \\
+        ضریب برش در الگوریتم (\lr{Clip Coefficient}) & $0.2$ \\
+        تعداد دورهای بهینه‌سازی در هر گام (\lr{PPO Epochs}) & $4$ \\
+        اندازه دسته آموزش (\lr{Batch Size}) & $64$ \\
+        ضریب تخفیف پاداش ($\gamma$) & $0.99$ \\
+        پارامتر الگوریتم GAE ($\lambda$) & $0.95$ \\
+        ضریب تابع ارزش در ضرر (\lr{vf\_coef}) & $0.5$ \\
+        ضریب آنتروپی (\lr{ent\_coef}) & $0.01$ \\
+        ضریب جریمه هم‌پوشانی & $0.20$ \\
+        حداکثر گام‌های مجاز در هر اپیزود & $100$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{اعتبارسنجی با آزمون‌های رگرسیون و تست‌های واحد}
+در این بخش به تشریح نقش تست‌های خودکار پیاده‌سازی‌شده در دایرکتوری \lr{tests/} پرداخته می‌شود. این تست‌ها تضمین می‌کنند که خطاهای کشف‌شده در طول چرخه توسعه (مانند قفل شدن در چرخه دوحالته یا نشت اطلاعات سراسری به دید محلی) مجدداً در نسخه‌های بعدی سیستم رخ ندهند.
+
+
+\section{سنجش سقف تئوری پوشش شبکه}
+توضیح ابزار \lr{ceiling\_probe.py} و اجرای الگوریتم تپه‌نوردی حریصانه برای تعیین کران بالای هندسی پوشش کاربران با توجه به تعداد عامل‌ها و شعاع پوشش، و اثبات اینکه هدف پایان اپیزود (مثلاً ۹۰٪ پوشش) از نظر هندسی قابل دستیابی است.
+
+
+\section{تحلیل نمودارهای یادگیری و روند همگرایی}
+در این بخش تحلیل نمودارهای به‌دست‌آمده از فرایند آموزش آورده می‌شود.
+
+
+در این زیربخش باید توضیح داده شود که با افزایش تعداد زوج‌ها از ۲ تا مقادیر بالاتر، میانگین پوشش روندی صعودی دارد، اما به دلیل محدودیت‌های مساحت نقشه و هم‌پوشانی هندسی، نرخ رشد پوشش به تدریج کند شده و به حالت اشباع نزدیک می‌شود.
+
+\subsection{نمودار پاداش تجمعی اپیزودها}
+باید نمودار پاداش بر حسب اپیزودها قرار داده شود. این نمودار روند صعودی و همگرایی مدل را نشان می‌دهد و نوسانات طبیعی ناشی از تصادفی بودن توزیع کاربران در هر اپیزود با میانگین متحرک و بازه واریانس مشخص می‌شود.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for Training Reward Curve
+    \framebox[0.85\textwidth][c]{\raisebox{0pt}[5cm][5cm]{نمودار روند صعودی پاداش تجمعی اپیزودها در طول آموزش به همراه بازه واریانس و خط میانگین متحرک ۱۰۰تایی}}
+    \caption{نمودار تغییرات پاداش تجمعی اپیزودها در طول فرایند آموزش مدل}
+    \label{fig:reward_curve}
+\end{figure}
+
+\subsection{نرخ پوشش کاربران و مدت‌زمان اپیزودها}
+در این بخش توضیح داده می‌شود که چگونه درصد پوشش کاربران با پیشرفت آموزش افزایش یافته و همزمان با فعال شدن پاداش سرعت پایانی، عامل‌ها یاد گرفته‌اند در گام‌های کوتاه‌تر به پوشش هدف دست یابند.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for Coverage Rate & Length Curve
+    \framebox[0.85\textwidth][c]{\raisebox{0pt}[4.5cm][4.5cm]{نمودار دوگانه: افزایش درصد پوشش یکتا و کاهش تعداد گام‌های سپری‌شده تا حل مسئله}}
+    \caption{روند بهبود درصد پوشش یکتای کاربران و کاهش گام‌های حل اپیزود}
+    \label{fig:coverage_and_steps}
+\end{figure}
+
+\section{تحلیل مقیاس‌پذیری و تاثیر تعداد زوج‌عامل‌ها بر میزان پوشش}
+در این بخش، اثر افزایش تعداد زوج‌عامل‌ها (ترکیب یک خودروی VBS و یک پهپاد FBS متصل به آن) بر کارایی پوشش کل شبکه ارزیابی می‌شود. به این منظور، مدل برای حالات مختلف با ۲، ۳، ۴، ۵، ۶ و ۷ زوج‌عامل آموزش داده شده و سپس روی ۱۰۰ بذر تصادفی توزیع کاربران در فاز ارزیابی (Inference) اجرا شده است.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for Agent-Pairs vs Coverage Plot
+    \framebox[0.85\textwidth][c]{\raisebox{0pt}[5cm][5cm]{نمودار خطی/میله‌ای: محور افقی: تعداد زوج‌عامل‌ها (۲ تا ۷) | محور عمودی: میانگین درصد پوشش یکتا روی ۱۰۰ ارزیابی مستقل به همراه بازه خطا}}
+    \caption{تاثیر افزایش تعداد زوج‌عامل‌ها بر میانگین درصد پوشش شبکه سلولی در ۱۰۰ ارزیابی تصادفی}
+    \label{fig:agent_pairs_scalability}
+\end{figure}
+
+
+\section{ارزیابی تعمیم‌پذیری: مقایسه آموزش تک‌توزیع و آموزش عمومی}
+در این بخش، یکی از نتایج اصلی پژوهش با تکیه بر اسکریپت‌های ارزیابی بررسی می‌شود: مقایسه عملکرد مدلی که صرفاً روی یک توزیع خاص (مثلاً سید ۴۲) بیش‌برازش (\lr{Overfit}) شده با مدلی که در طول ۲۰۰۰ اپیزود با توزیع‌های مختلف آموزش دیده است، در مواجهه با ۱۰۰ سید جدید و ندیده‌شده در فاز ارزیابی (\lr{Inference}).
+
+\begin{table}[H]
+    \centering
+    \caption{مقایسه عملکرد مدل آموزش‌دیده روی سید خاص در برابر مدل عمومی بر روی ۱۰۰ توزیع جدید}
+    \label{tab:generalization_results}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{مدل ارزیابی‌شده} & \textbf{نرخ حل موفق (\%)} & \textbf{میانگین پوشش یکتا (\%)} & \textbf{میانگین گام‌ها تا حل} \\
+        \midrule
+        مدل بیش‌برازش‌شده (فقط سید ۴۲) & درج مقدار & درج مقدار & درج مقدار \\
+        مدل آموزش‌دیده روی توزیع‌های متنوع & درج مقدار & درج مقدار & درج مقدار \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+توضیح این نکته ضروری است که مدل بیش‌برازش‌شده اگرچه روی همان سید ۴۲ عملکردی عالی دارد، اما با تغییر توزیع کاربران دچار افت شدید می‌شود؛ در حالی که مدل عمومی توانسته الگوهای هندسی استقرار را به خوبی فرا بگیرد.
+
+\section{مقایسه کارایی معماری‌های منتقد}
+ارائه نتایج ابزار مقایسه‌ای \lr{offline\_critic\_eval.py} و مقایسه دو ساختار \lr{Deep-Sets} و \lr{Attention} از منظر واریانس تبیین‌شده (\lr{Explained Variance}) بر روی داده‌های ثبت‌شده، و چرایی انتخاب معماری نهایی.
+
+\section{تحلیل زمان اجرا و تاخیر در مرحله ارزیابی}
+از دیدگاه کاربردی و مهندسی مخابرات، مدل باید در زمان واقعی بتواند تصمیم‌گیری کند. در این بخش میانگین زمان اجرای هر گام تصمیم‌گیری برای کل تیم گزارش می‌شود.
+
+\begin{table}[H]
+    \centering
+    \caption{میانگین زمان استنتاج مدل به ازای هر گام تصمیم‌گیری}
+    \label{tab:inference_latency}
+    \begin{tabular}{lcc}
+        \toprule
+        \textbf{سخت‌افزار اجرای مدل} & \textbf{میانگین زمان تصمیم‌گیری (میلی‌ثانیه)} & \textbf{نرخ فریم شبیه‌سازی (\lr{FPS})} \\
+        \midrule
+        پردازنده مرکزی (CPU) & درج زمان اندازه‌گیری‌شده & درج مقدار \\
+        شتاب‌دهنده گرافیکی (GPU) & درج زمان اندازه‌گیری‌شده & درج مقدار \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+نتیجه‌گیری در خصوص اینکه تصمیم‌گیری در حد چند میلی‌ثانیه برای نرخ تغییر موقعیت خودروها و پهپادها در واقعیت کاملاً مناسب و بلادرنگ است.
+
+\section{جمع‌بندی}
+خلاصه یک پاراگرافی از دستاوردهای عددی و تایید کارایی راه‌حل‌های ارائه‌شده در این فصل.
+
+% =============================================================================
+% CHAPTER 5: CONCLUSION AND FUTURE WORK
+% =============================================================================
+\chapter{نتیجه‌گیری و پیشنهادات}
+در این فصل دستاوردهای پژوهش مرور شده و پیشنهاداتی برای توسعه‌های آتی ارائه می‌شود.
+
+\section{نتیجه‌گیری}
+مروری بر حل موفقیت‌آمیز چالش‌های هماهنگی میان خودرو و پهپادهای وابسته در یک بستر یادگیری تقویتی چندعامله. اثبات شد که بازطراحی فضاهای کنش به صورت مطلق، حسگری محلی سکتوری، استفاده از پاداش سهم حاشیه‌ای و به‌کارگیری منتقد سه‌سر، همگرایی پایدار مدل را تضمین کرده و منجر به ایجاد پوشش یکتای بالا و کاهش زمان حل مسئله در مواجهه با توزیع‌های مختلف کاربران می‌شود.
+
+\section{محدودیت‌های پژوهش}
+در این بخش محدودیت‌های ساختاری نسخه فعلی پروژه تشریح می‌شود:
+\begin{itemize}
+    \item ثابت بودن تعداد شاخه‌های گراف جاده‌ای در مقدار پیش‌فرض ۳ شاخه.
+    \item استفاده از تقریب برداری فاصله در شبیه‌ساز مکانی جهت تسریع آموزش نسبت به محاسبات زمان‌بر تداخل سیگنال (SINR) در موتور کامل مخابراتی.
+\end{itemize}
+
+\section{پیشنهادات برای کارهای آینده}
+برای ادامه این پژوهش و ارتقای آن در مقاطع تحصیلی بعدی، پیشنهادهای زیر مطرح می‌گردد:
+\begin{itemize}
+    \item \textbf{مدل کانال مخابراتی کامل‌تر:} افزودن محاسبات تداخل فرکانسی و نسبت سیگنال به تداخل و نویز (\lr{SINR}) با فعال‌سازی کامل ماژول \lr{PyWiSim}.
+    \item \textbf{گراف‌های جاده‌ای متغیر:} تعمیم شبکه راه‌ها به گراف‌های شهری پیچیده‌تر با تقاطع‌ها و خیابان‌های متعدد.
+    \item \textbf{پروتکل‌های ارتباطی میان‌عاملی:} پیاده‌سازی پروتکل‌های پیام‌رسانی محدود میان خودروها برای تبادل اطلاعات محلی بدون نقض ساختار غیرمتمرکز.
+    \item \textbf{مدل‌سازی سه‌بعدی پرواز:} افزودن بعد ارتفاع به حرکت پهپادها و در نظر گرفتن مصرف انرژی باتری در تابع پاداش.
+\end{itemize}
+
+% =============================================================================
+% References / Bibliography
+% =============================================================================
+\newpage
+\begin{thebibliography}{9}
+\begin{LTRitems}
+
+\bibitem{ref_ppo}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov, ``Proximal policy optimization algorithms,'' \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem{ref_mappo}
+C.~Yu, A.~Velu, E.~Vinitsky, J.~Gao, Y.~Wang, A.~Bayen, and Y.~Wu, ``The surprising effectiveness of PPO in cooperative multi-agent games,'' \emph{Advances in Neural Information Processing Systems}, vol.~35, pp. 24611--24624, 2022.
+
+\bibitem{ref_pettingzoo}
+J.~K.~Terry, B.~Black, N.~Grammel, K.~Jayakumar, A.~Hari, R.~Sullivan, L.~Santos, C.~Riva, M.~D'Souza, et al., ``PettingZoo: Gym for multi-agent reinforcement learning,'' \emph{Advances in Neural Information Processing Systems}, vol.~34, pp. 15032--15043, 2021.
+
+\bibitem{ref_uav_cellular}
+M.~Mozaffari, W.~Saad, M.~Bennis, Y.~H.~Nam, and M.~Debbah, ``A tutorial on UAVs for wireless networks: Applications, challenges, and open problems,'' \emph{IEEE Communications Surveys \& Tutorials}, vol.~21, no.~3, pp. 2334--2360, 2019.
+
+\bibitem{ref_deepsets}
+M.~Zaheer, S.~Kottur, S.~Ravanbakhsh, B.~Poczos, R.~R.~Salakhutdinov, and A.~J.~Smola, ``Deep sets,'' \emph{Advances in Neural Information Processing Systems}, vol.~30, 2017.
+
+\end{LTRitems}
+\end{thebibliography}
+
+% =============================================================================
+% Appendix
+% =============================================================================
+\appendix
+\chapter{لیست برنامه‌ها و ساختار مخزن کد}
+در این پیوست ساختار فایل‌ها و پوشه‌بندی کدهای پیاده‌سازی‌شده در پروژه آورده می‌شود.
+
+\begin{lstlisting}[caption={ساختار پوشه‌ها و فایل‌های کلیدی پروژه}, label={lst:project_structure}]
+marl_network_sim/
+  core/
+    entities/
+      agents.py               # Classes for VBS, FBS and AgentManager
+    interfaces/
+      graph_engine_abc.py     # ABC contract for topological road graph
+      network_sim_abc.py      # ABC contract for spatial user coverage
+      tracking_abc.py         # ABC contract for experiment logging
+  infrastructure/
+    graph/
+      networkx_engine.py      # NetworkX implementation of road graph
+    simulation/
+      pywisim_adapter.py      # Vectorized coverage computation adapter
+    tracking/
+      tensorboard_tracker.py  # Real-time Tensorboard telemetry logger
+    training/
+      determinism.py          # Strict seed pinning and reproducibility
+  rl/
+    envs/
+      pettingzoo_env.py       # Multi-agent ParallelEnv environment
+      reward_normalizer.py    # StationaryScaler for stable reward signals
+    agents/
+      ppo_module.py           # Actor MLPs, Deep-Sets & Attention Critic
+  config/
+    graph_map.json            # Road topology nodes and links specification
+    simulation_config.json    # Agent specs and PPO hyperparameters
+  tools/
+    ab_compare.py             # Statistical comparison tool for runs
+    ceiling_probe.py          # Greedy hill-climbing coverage ceiling probe
+    offline_critic_eval.py    # Offline EV bake-off for critic architectures
+  main.py                     # Primary MARL training orchestration loop
+  inference.py                # Deterministic evaluation and frame export
+\end{lstlisting}
+
+\end{document}
