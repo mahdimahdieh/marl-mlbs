@@ -384,40 +384,29 @@ class PygameRenderer:
                          (x + 2, y + h - 13))
 
     def _draw_agent_matrix(self, env: Any, x, w, y_top, y_bottom):
-        """Grouped VBS rows with tethered-FBS sub-rows: (branch, slot) and
-        capacity ratio per VBS; offset zone + distance-to-host per FBS."""
+        """Linux-tree style view: each VBS node with its (branch, slot), then
+        tethered FBS children with offset zone + distance-to-host."""
         am = env.agent_manager
         y = y_top
         for vbs_id in sorted(am.vbs_registry):
             vbs = am.vbs_registry[vbs_id]
             if y + 16 > y_bottom:
                 return
-            filled = min(vbs.current_coverage_count, vbs.capacity)
-            ratio = filled / vbs.capacity if vbs.capacity > 0 else 0.0
-            ratio_color = (self.panel["warn"] if ratio >= 1.0 else
-                           self.panel["bar_fill_good"] if ratio >= 0.5 else
-                           self.panel["bar_fill"])
-            header = f"VBS_{vbs_id}  B{vbs.current_branch_id} S{vbs.current_slot_index:<2d}  {filled}/{vbs.capacity}"
+            header = f"VBS_{vbs_id}: B{vbs.current_branch_id} S{vbs.current_slot_index}"
             self.screen.blit(self.font_mono.render(header, True, self.panel["text"]), (x, y))
-            pct = self.font_small.render(f"{ratio * 100.0:3.0f}%", True, ratio_color)
-            self.screen.blit(pct, (x + w - pct.get_width(), y + 1))
-            y += 17
-            if y + 8 > y_bottom:
-                return
-            self._draw_bar(x + 16, y, w - 16, 6, ratio, ratio_color)
-            y += 12
+            y += 16
 
             host_x, host_y = env._calculate_world_coords(vbs, True)
-            for fbs_id in vbs.tethered_fbs_ids:
-                fbs = am.fbs_registry.get(fbs_id)
-                if fbs is None:
-                    continue
+            children = [i for i in vbs.tethered_fbs_ids if i in am.fbs_registry]
+            for j, fbs_id in enumerate(children):
                 if y + 15 > y_bottom:
                     return
+                fbs = am.fbs_registry[fbs_id]
                 fbs_x, fbs_y = env._calculate_world_coords(fbs, False)
                 dist = math.hypot(fbs_x - host_x, fbs_y - host_y)
-                line = f"+- FBS_{fbs_id}  Z:{fbs.current_offset_zone:2d}  d:{dist:6.1f}m"
+                branch = "└──" if j == len(children) - 1 else "├──"
+                line = f"{branch} FBS_{fbs_id}: Z:{fbs.current_offset_zone:2d}  d:{dist:6.1f}m"
                 line_color = self.panel["warn"] if fbs.current_offset_zone == 0 else self.panel["text_dim"]
-                self.screen.blit(self.font_mono.render(line, True, line_color), (x + 10, y))
+                self.screen.blit(self.font_mono.render(line, True, line_color), (x + 4, y))
                 y += 15
             y += 6
